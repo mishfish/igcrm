@@ -1,123 +1,139 @@
-# igcrm — картки клієнтів з Instagram Direct
+# igcrm — customer cards from Instagram Direct
 
-Ти переписуєшся з клієнтами як завжди, з телефону. Сервіс:
+You keep chatting with customers as usual, from your phone. The service:
 
-1. ловить усі повідомлення Direct (вхідні й твої відповіді) через вебхуки Meta → Postgres;
-2. створює контакт і підтягує @username;
-3. через 3 хв тиші в діалозі віддає останні повідомлення в LLM і заповнює картку:
-   **ПІБ, телефон, місто, відділення НП, розміри, що хотів купити**;
-4. позначає картку `needs_review = true`, щоб ти глянув, що змінилось (історія — в `extractions`);
-5. сам оновлює токен Instagram і шле алерт у Telegram, якщо не вийшло.
+1. catches every Direct message (incoming and your replies) via Meta webhooks → Postgres;
+2. creates a contact and fetches their @username;
+3. after 3 minutes of silence in the thread, sends the recent messages to an LLM and fills in the card:
+   **full name, phone, city, Nova Poshta branch, sizes, what they wanted to buy**;
+4. flags the card `needs_review = true` so you can check what changed (history is in `extractions`);
+5. refreshes the Instagram token itself and sends a Telegram alert if it fails.
 
-Замовлення ведеш у Directus: обираєш клієнта, вписуєш товар і суму — ПІБ/телефон/відділення
-підставляються з картки автоматично.
+You manage orders in Directus: pick the customer, enter the item and amount — name/phone/branch
+are filled in automatically from the card.
 
 ```
 Instagram ─webhook─▶ igcrm (Go) ─▶ Postgres ◀─ Directus (UI)
-                        └─▶ LLM (OpenAI-сумісний API)
-           Caddy (HTTPS, Let's Encrypt) перед усім
+                        └─▶ LLM (OpenAI-compatible API)
+           Caddy (HTTPS, Let's Encrypt) in front of everything
 ```
 
-## Таблиці
+## Tables
 
-| таблиця | що там |
+| table | what's in it |
 |---|---|
-| `contacts` | картка клієнта. `auto_update=false` — сервіс більше не чіпає поля; `notes` — твоє, сервіс не пише |
-| `messages` | уся переписка (`in` / `out`) |
-| `orders` | замовлення: статус, товари, сума, ТТН, отримувач |
-| `extractions` | журнал: що витягнув LLM і які поля змінив (старе → нове) |
-| `ig_token` | токен Instagram. **Сховай у Directus** |
+| `contacts` | customer card. `auto_update=false` — the service stops touching the fields; `notes` is yours, the service never writes there |
+| `messages` | the full conversation (`in` / `out`) |
+| `orders` | orders: status, items, amount, tracking number, recipient |
+| `extractions` | log of what the LLM extracted and which fields it changed (old → new) |
+| `ig_token` | Instagram token. **Hide it in Directus** |
 
-## Розгортання
+## Deployment
 
-Потрібно: VPS (≥2 GB RAM, Directus на Node їсть ~400 MB), домен з A-записом на IP сервера, відкриті 80/443.
+You need: a VPS (≥2 GB RAM, Directus on Node eats ~400 MB), a domain with an A record pointing
+at the server's IP, ports 80/443 open.
 
 ```sh
-git clone … /opt/igcrm && cd /opt/igcrm   # або scp цієї папки
-cp .env.example .env && nano .env          # заповни все, крім IG_* (поки що)
+git clone … /opt/igcrm && cd /opt/igcrm   # or scp this folder
+cp .env.example .env && nano .env          # fill in everything except IG_* (for now)
 docker compose up -d --build
 docker compose logs -f igcrm
 ```
 
-Відкрий `https://DOMAIN` → логін Directus (email/пароль з `.env`).
+Open `https://DOMAIN` → Directus login (email/password from `.env`).
 
-## Meta / Instagram (один раз, ~30–60 хв клацання)
+## Meta / Instagram (one-time, ~30–60 min of clicking)
 
-1. Instagram акаунт → **професійний** (бізнес або автор).
+1. Instagram account → **professional** (business or creator).
 2. developers.facebook.com → Create App → use case **"Manage messaging & content on Instagram"**.
-3. App roles → додай свій Instagram як **Instagram tester** і прийми запрошення в Instagram
-   (на instagram.com: Налаштування → Дозволи застосунків і сайтів → Запрошення тестувальника;
-   назви пунктів Meta змінює, шукай «tester invites»).
+3. App roles → add your Instagram as an **Instagram tester** and accept the invite on Instagram
+   (on instagram.com: Settings → Apps and websites permissions → Tester invites;
+   Meta renames these menu items often, search for "tester invites").
 4. Instagram → **API setup with Instagram login**:
-   - **Generate token** для свого акаунта → `IG_ACCESS_TOKEN` у `.env`;
+   - **Generate token** for your account → `IG_ACCESS_TOKEN` in `.env`;
    - Business login settings → **Instagram app secret** → `IG_APP_SECRET`
-     (саме цей, а не App secret з Settings → Basic — інакше вебхуки падатимуть з 401);
-   - `docker compose up -d` (перезапуск з новими змінними);
+     (this one, not the App secret from Settings → Basic — otherwise webhooks fail with 401);
+   - `docker compose up -d` (restart with the new env vars);
    - **Configure webhooks**: Callback URL `https://DOMAIN/ig/webhook`, Verify token = `IG_VERIFY_TOKEN`
-     → Verify and save → підпишись на поле **messages** (+ `message_echoes`, якщо є окремо).
-5. В Instagram: Налаштування → Повідомлення → **Підключені інструменти → Дозволити доступ до повідомлень**.
-   Без цього вебхуки не приходять — найчастіша причина «все налаштував, а тиша».
-6. Напиши собі з іншого акаунта → у `docker compose logs igcrm` має з'явитись `msg=message dir=in`.
+     → Verify and save → subscribe to the **messages** field (+ `message_echoes` if listed separately).
+5. On Instagram: Settings → Messages → **Connected tools → Allow access to messages**.
+   Without this, webhooks never arrive — the most common "I set everything up and it's silent" cause.
+6. Message yourself from another account → `docker compose logs igcrm` should show `msg=message dir=in`.
 
-App Review / Business Verification **не потрібні**: Standard Access працює для акаунтів, які є
-в ролях апки. Якщо Meta вимагатиме Live mode — потрібен лише URL privacy policy (будь-яка сторінка).
+App Review / Business Verification are **not needed**: Standard Access works for accounts that
+hold a role on the app. If Meta asks for Live mode, it only needs a privacy policy URL (any page) —
+and the app must actually be **published** for webhooks to fire at all, not just "configured".
 
-### Старі переписки (опційно)
+### Old conversations (optional)
 
 ```sh
 docker compose run --rm igcrm backfill
 ```
 
-Через Conversations API заливає діалоги, які вже є в Direct, і ставить їх у чергу на екстракцію.
-Meta віддає лише останні повідомлення кожного діалогу (не всю історію). Це best-effort: я не міг
-перевірити на живому акаунті, тож якщо впаде — скинь помилку.
+Uses the Conversations API to pull in threads that already exist in Direct, and queues them for
+extraction. Meta only returns the most recent messages of each thread (not the full history).
+This is best-effort: I couldn't test it against a live account, so report back if it breaks.
 
 ## LLM
 
-Два варіанти, `LLM_PROVIDER`:
+Two options, `LLM_PROVIDER`:
 
-- `openai` (дефолт) — будь-який OpenAI-сумісний `/chat/completions`: OpenAI, OpenRouter, Ollama тощо.
-  Потрібні `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`.
-- `claude` — [Claude API](https://console.anthropic.com) напряму, без `LLM_BASE_URL`.
-  `LLM_API_KEY` = ключ з console.anthropic.com, `LLM_MODEL=claude-haiku-5-5` (дешева модель, достатня для такої екстракції).
+- `openai` (default) — any OpenAI-compatible `/chat/completions`: OpenAI, OpenRouter, Ollama, etc.
+  Needs `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`.
+- `claude` — [Claude API](https://console.anthropic.com) directly, no `LLM_BASE_URL`.
+  `LLM_API_KEY` = key from console.anthropic.com, `LLM_MODEL=claude-haiku-5-5` (a cheap model, plenty for this kind of extraction).
 
-Потрібна дешева модель; на кілька десятків діалогів на день це центи на місяць.
-Без `LLM_MODEL` (і ключа/endpoint для обраного провайдера) сервіс просто зберігає переписку.
+A cheap model is enough; for a few dozen conversations a day this costs cents a month.
+Without `LLM_MODEL` (and a key/endpoint for the chosen provider) the service just stores the conversation.
 
-Що варто знати:
-- ПІБ, телефони й адреси клієнтів ідуть до провайдера LLM. Якщо це неприйнятно — локальна модель
-  (Ollama), але на VPS за €5 вона не влізе.
-- Модель помиляється. Тому `needs_review` + журнал `extractions` + `auto_update=false` для ручного режиму.
-- Порожні відповіді моделі ніколи не стирають наявні дані; телефон нормалізується до `+380…`,
-  відділення — до `Відділення №45` / `Поштомат №1234`.
+Worth knowing:
+- Customer names, phone numbers and addresses go to the LLM provider. If that's not acceptable,
+  a local model (Ollama) is an option, but it won't fit on a €5 VPS.
+- The model makes mistakes. Hence `needs_review` + the `extractions` log + `auto_update=false` for manual mode.
+- Empty model answers never erase existing data; phone numbers are normalized to `+380…`,
+  branches to `Branch No. 45` / `Parcel locker No. 1234`.
 
-## Directus: первинне налаштування (~15 хв)
+## Directus: initial setup (~15 min)
 
-Таблиці сервісу з'являються в Settings → Data Model як некеровані — клікни кожну, щоб Directus її підхопив.
+The service's tables show up in Settings → Data Model as untracked — click each one so Directus picks it up.
 
-1. **contacts** → додай поле типу *One to Many* «Замовлення» → `orders.contact_id`
-   і ще одне «Переписка» → `messages.contact_id` (сортування за `sent_at`).
-   Display template колекції: `{{username}} {{full_name}}`.
-2. **orders** → поле `contact_id` інтерфейс *Many to One* (вибір клієнта);
-   `status` → інтерфейс Dropdown з варіантами: new, awaiting_payment, paid, shipped, delivered, returned, cancelled.
+1. **contacts** → add a *One to Many* field "Orders" → `orders.contact_id`
+   and another "Messages" → `messages.contact_id` (sorted by `sent_at`).
+   Collection display template: `{{username}} {{full_name}}`.
+2. **orders** → `contact_id` field, *Many to One* interface (pick a customer);
+   `status` → Dropdown interface with options: new, awaiting_payment, paid, shipped, delivered, returned, cancelled.
 3. **ig_token**, **schema_migrations** → Hidden.
-4. У contacts збережи закладку з фільтром `needs_review = true` → «Перевірити».
+4. On contacts, save a bookmark with the filter `needs_review = true` → "To review".
+5. **Conversation as chat**: `directus-extensions/chat-history` — a custom interface that renders
+   the related messages as chat bubbles right inside the customer card. Build and deploy:
+   ```sh
+   cd directus-extensions/chat-history && npm install && npm run build
+   scp -r package.json dist root@<server>:/opt/igcrm/chat-history-ext/
+   ssh root@<server> 'docker cp /opt/igcrm/chat-history-ext igcrm-directus-1:/directus/extensions/chat-history \
+     && docker exec -u root igcrm-directus-1 chown -R node:node /directus/extensions/chat-history \
+     && docker compose restart directus'
+   ```
+   After deploying, activate it on the `contacts.messages` field: `PATCH /fields/contacts/messages {"meta":{"interface":"chat-history"}}`.
 
-Після цього картка клієнта = поля + список замовлень + переписка на одній сторінці.
+After this, a customer card = fields + list of orders + conversation, all on one page.
 
-## Обслуговування
+## Maintenance
 
-- **Бекапи**: `scripts/backup.sh` у cron (рядок усередині файлу) + копія поза сервером (rclone → B2).
-  Без цього пункту вся система — до першого збою диска.
-- **Токен**: оновлюється автоматично за 15 днів до кінця (діє 60 днів). Алерт у Telegram, якщо не вдалося.
-  Новий токен вручну: вписати в `.env`, `IG_ACCESS_TOKEN_FORCE=1`, перезапустити, повернути `0`.
-- **Версія API**: `IG_API_VERSION`. Meta раз на ~2 роки вимикає старі версії — тоді підняти.
-- **Медіа**: URL вкладень у `messages.attachments` тимчасові (CDN Meta), фото не зберігаються.
+- **Backups**: `scripts/backup.sh` in cron (the line is inside the file) + an offsite copy
+  (rclone → Google Drive, remote `gdrive:`). Skip this and the whole system is one disk failure away from gone.
+- **Alerts**: `TG_BOT_TOKEN`/`TG_CHAT_ID` in `.env` — a Telegram bot (create via @BotFather) that
+  sends alerts when the IG token refresh fails and when a backup fails.
+- **Uptime**: an external monitor (UptimeRobot) on `/healthz`, since the service can't notify
+  anyone about its own downtime.
+- **Token**: refreshes automatically 15 days before expiry (lasts 60 days). Telegram alert if it fails.
+  Manual refresh: paste the new token into `.env`, set `IG_ACCESS_TOKEN_FORCE=1`, restart, then set it back to `0`.
+- **API version**: `IG_API_VERSION`. Meta retires old versions roughly every ~2 years — bump it then.
+- **Media**: attachment URLs in `messages.attachments` are temporary (Meta's CDN); photos aren't stored.
 
-## Розробка
+## Development
 
 ```sh
-go test ./...                                          # юніт-тести
-TEST_DATABASE_URL=postgres://… go test ./internal/store/   # інтеграційний (затирає схему public!)
+go test ./...                                          # unit tests
+TEST_DATABASE_URL=postgres://… go test ./internal/store/   # integration test (wipes the public schema!)
 ```
-Для живих вебхуків локально: `cloudflared tunnel --url http://localhost:8080`.
+For live webhooks locally: `cloudflared tunnel --url http://localhost:8080`.

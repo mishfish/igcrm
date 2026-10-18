@@ -62,6 +62,7 @@ services:
       DOMAIN: ${DOMAIN:?set in .env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy_static_privacy.html:/srv/static/privacy.html:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
