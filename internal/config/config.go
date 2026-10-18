@@ -19,7 +19,8 @@ type Config struct {
 	IGAPIVersion       string
 	IGRefreshThreshold time.Duration
 
-	// LLM (OpenAI-compatible: OpenAI, OpenRouter, Ollama, ...)
+	// LLM: openai (OpenAI-сумісний: OpenAI, OpenRouter, Ollama, ...) або claude (Claude API)
+	LLMProvider     string
 	LLMBaseURL      string
 	LLMAPIKey       string
 	LLMModel        string
@@ -41,6 +42,7 @@ func Load() (Config, error) {
 		IGForceToken:       os.Getenv("IG_ACCESS_TOKEN_FORCE") == "1",
 		IGAPIVersion:       env("IG_API_VERSION", "v23.0"),
 		IGRefreshThreshold: dur("IG_REFRESH_THRESHOLD", 15*24*time.Hour),
+		LLMProvider:        env("LLM_PROVIDER", "openai"),
 		LLMBaseURL:         strings.TrimRight(os.Getenv("LLM_BASE_URL"), "/"),
 		LLMAPIKey:          os.Getenv("LLM_API_KEY"),
 		LLMModel:           os.Getenv("LLM_MODEL"),
@@ -65,8 +67,16 @@ func Load() (Config, error) {
 	return c, nil
 }
 
-// LLMEnabled — екстракція вмикається, коли задано endpoint і модель.
-func (c Config) LLMEnabled() bool { return c.LLMBaseURL != "" && c.LLMModel != "" }
+// LLMEnabled — екстракція вмикається, коли задано модель і ключ/endpoint для обраного провайдера.
+func (c Config) LLMEnabled() bool {
+	if c.LLMModel == "" {
+		return false
+	}
+	if c.LLMProvider == "claude" {
+		return c.LLMAPIKey != ""
+	}
+	return c.LLMBaseURL != ""
+}
 
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {

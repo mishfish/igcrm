@@ -74,9 +74,15 @@ Meta віддає лише останні повідомлення кожног�
 
 ## LLM
 
-Будь-який OpenAI-сумісний `/chat/completions`: OpenAI, OpenRouter, Ollama тощо.
-Потрібна дешева «mini»-модель; на кілька десятків діалогів на день це центи на місяць.
-Без `LLM_BASE_URL`/`LLM_MODEL` сервіс просто зберігає переписку.
+Два варіанти, `LLM_PROVIDER`:
+
+- `openai` (дефолт) — будь-який OpenAI-сумісний `/chat/completions`: OpenAI, OpenRouter, Ollama тощо.
+  Потрібні `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`.
+- `claude` — [Claude API](https://console.anthropic.com) напряму, без `LLM_BASE_URL`.
+  `LLM_API_KEY` = ключ з console.anthropic.com, `LLM_MODEL=claude-haiku-5-5` (дешева модель, достатня для такої екстракції).
+
+Потрібна дешева модель; на кілька десятків діалогів на день це центи на місяць.
+Без `LLM_MODEL` (і ключа/endpoint для обраного провайдера) сервіс просто зберігає переписку.
 
 Що варто знати:
 - ПІБ, телефони й адреси клієнтів ідуть до провайдера LLM. Якщо це неприйнятно — локальна модель

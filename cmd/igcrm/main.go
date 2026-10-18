@@ -78,11 +78,16 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, igc *ig.Clie
 	go (&jobs.TokenRefresher{Store: st, IG: igc, Notify: n, Threshold: cfg.IGRefreshThreshold, Log: log}).Run(ctx)
 	go (&jobs.ProfileFetcher{Store: st, IG: igc, Log: log}).Run(ctx)
 	if cfg.LLMEnabled() {
-		llm := &extract.LLM{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, Model: cfg.LLMModel}
+		var llm extract.Completer
+		if cfg.LLMProvider == "claude" {
+			llm = extract.NewClaude(cfg.LLMAPIKey, cfg.LLMModel)
+		} else {
+			llm = &extract.LLM{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, Model: cfg.LLMModel}
+		}
 		go (&extract.Worker{Store: st, LLM: llm, Model: cfg.LLMModel, History: cfg.ExtractHistory, Log: log}).Run(ctx)
-		log.Info("extraction enabled", "model", cfg.LLMModel)
+		log.Info("extraction enabled", "provider", cfg.LLMProvider, "model", cfg.LLMModel)
 	} else {
-		log.Warn("extraction disabled: задай LLM_BASE_URL і LLM_MODEL")
+		log.Warn("extraction disabled: задай LLM_MODEL і LLM_API_KEY (claude) або LLM_BASE_URL (openai-сумісний)")
 	}
 
 	mux := http.NewServeMux()
