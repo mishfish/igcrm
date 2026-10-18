@@ -128,6 +128,15 @@ The service's tables show up in Settings → Data Model as untracked — click e
      && docker compose restart directus'
    ```
    After deploying, activate it on the `contacts.messages` field: `PATCH /fields/contacts/messages {"meta":{"interface":"chat-history"}}`.
+6. **Conversation on the order form**: `directus-extensions/order-chat` — same idea, but reads
+   `contact_id` from the order form itself (there's no direct relation from orders to messages) via
+   `inject('values')`, so it works from an order without navigating to the contact. Build and deploy
+   the same way as chat-history (own extension folder, own container path). Then add it as a new
+   field on `orders`:
+   ```sh
+   curl -X POST https://DOMAIN/fields/orders -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"field":"client_chat","type":"alias","meta":{"interface":"order-chat","special":["alias","no-data"],"width":"full"}}'
+   ```
 
 After this, a customer card = fields + list of orders + conversation, all on one page.
 
