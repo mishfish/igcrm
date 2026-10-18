@@ -7,7 +7,9 @@ You keep chatting with customers as usual, from your phone. The service:
 3. after 3 minutes of silence in the thread, sends the recent messages to an LLM and fills in the card:
    **full name, phone, city, Nova Poshta branch, sizes, what they wanted to buy**;
 4. flags the card `needs_review = true` so you can check what changed (history is in `extractions`);
-5. refreshes the Instagram token itself and sends a Telegram alert if it fails.
+5. if the customer explicitly confirmed they want to order, creates an `orders` row for you
+   (item, amount if stated, recipient info from the card) — see **Auto-created orders** below;
+6. refreshes the Instagram token itself and sends a Telegram alert if it fails.
 
 You manage orders in Directus: pick the customer, enter the item and amount — name/phone/branch
 are filled in automatically from the card.
@@ -92,6 +94,18 @@ Worth knowing:
 - The model makes mistakes. Hence `needs_review` + the `extractions` log + `auto_update=false` for manual mode.
 - Empty model answers never erase existing data; phone numbers are normalized to `+380…`,
   branches to `Branch No. 45` / `Parcel locker No. 1234`.
+
+### Auto-created orders
+
+When the model sees an explicit "yes, I'll take it" in the conversation (not just interest or a price
+question), it creates an `orders` row for you: item/size from `last_interest`, amount if a sum was
+stated, recipient fields filled in from the card as usual. The row is marked `auto_created = true` and
+starts in status `new`, same as if you'd entered it by hand — **payment is never set automatically**,
+you still mark `paid` yourself once you've actually confirmed it.
+
+To avoid duplicate orders while a conversation keeps going, a new one is only auto-created if the
+customer has no order currently sitting in `new` / `awaiting_payment`. Once you move an order past
+that (paid, cancelled, etc.), the next confirmed order creates a fresh row.
 
 ## Directus: initial setup (~15 min)
 

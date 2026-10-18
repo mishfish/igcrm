@@ -21,7 +21,9 @@ const SystemPrompt = `Ти витягуєш дані клієнта з пере�
   "city":          місто/населений пункт доставки,
   "np_branch":     відділення або поштомат Нової Пошти, формат "Відділення №45" або "Поштомат №1234",
   "sizes":         розміри клієнта, коротко, напр. "одяг M, взуття 38",
-  "last_interest": що клієнт хоче купити/замовив останнім, коротко, до 80 символів
+  "last_interest": що клієнт хоче купити/замовив останнім, коротко, до 80 символів,
+  "order_ready":   true / false,
+  "order_amount":  сума замовлення в грн, якщо прямо названа в переписці, інакше null
 }
 
 Правила:
@@ -30,7 +32,9 @@ const SystemPrompt = `Ти витягуєш дані клієнта з пере�
 - Якщо значення змінювалось (нова адреса, інший розмір) — бери найсвіжіше.
 - Дані можуть бути в повідомленнях і клієнта, і магазину (магазин іноді перепитує "Київ, 45 відділення?" — "так").
 - Не плутай ПІБ отримувача з ім'ям продавця.
-- Мова значень — як у переписці, без перекладу.`
+- Мова значень — як у переписці, без перекладу.
+- order_ready = true лише якщо клієнт явно підтвердив, що бере товар ("так, беру",
+  "оформляйте", "замовляю") — не просто цікавиться, питає ціну чи наявність.`
 
 // BuildUserPrompt — поточна картка + останні повідомлення.
 func BuildUserPrompt(current map[string]string, lines []store.ChatLine) string {
@@ -102,6 +106,18 @@ func normalizeBranch(v string) string {
 	return "Відділення №" + m[3]
 }
 
+// OrderSignal читає з результату LLM ознаку готовності замовлення й суму (якщо названа).
+func OrderSignal(result json.RawMessage) (ready bool, amount *float64) {
+	var r struct {
+		OrderReady  bool     `json:"order_ready"`
+		OrderAmount *float64 `json:"order_amount"`
+	}
+	if err := json.Unmarshal(result, &r); err != nil {
+		return false, nil
+	}
+	return r.OrderReady, r.OrderAmount
+}
+
 // Diff порівнює результат LLM з карткою; повертає лише реальні зміни.
 // Порожні значення від моделі ніколи не стирають наявні дані.
 func Diff(current map[string]string, result json.RawMessage) (map[string]store.Change, error) {
@@ -145,6 +161,7 @@ type Store interface {
 	Contact(ctx context.Context, id int64) (store.Contact, error)
 	RecentMessages(ctx context.Context, contactID int64, n int) ([]store.ChatLine, error)
 	ApplyExtraction(ctx context.Context, id int64, model string, result json.RawMessage, changes map[string]store.Change) error
+	CreateOrderIfNone(ctx context.Context, contactID int64, items string, amount *float64) (orderID int64, created bool, err error)
 }
 
 type Completer interface {
@@ -227,6 +244,21 @@ func (w *Worker) Process(ctx context.Context, id int64) error {
 			fields = append(fields, f)
 		}
 		w.Log.Info("contact updated", "contact", id, "username", c.Username, "fields", fields)
+	}
+
+	if ready, amount := OrderSignal(result); ready {
+		items := c.Values["last_interest"]
+		if ch, ok := changes["last_interest"]; ok {
+			items = ch.New
+		}
+		if items != "" {
+			orderID, created, err := w.Store.CreateOrderIfNone(ctx, id, items, amount)
+			if err != nil {
+				w.Log.Error("order auto-create", "contact", id, "err", err)
+			} else if created {
+				w.Log.Info("order auto-created", "contact", id, "username", c.Username, "order", orderID, "items", items)
+			}
+		}
 	}
 	return nil
 }

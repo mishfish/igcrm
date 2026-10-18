@@ -71,6 +71,21 @@ func TestDiff(t *testing.T) {
 	}
 }
 
+func TestOrderSignal(t *testing.T) {
+	ready, amount := OrderSignal(json.RawMessage(`{"order_ready": true, "order_amount": 850}`))
+	if !ready || amount == nil || *amount != 850 {
+		t.Errorf("ready=%v amount=%v", ready, amount)
+	}
+	ready, amount = OrderSignal(json.RawMessage(`{"order_ready": false, "order_amount": null}`))
+	if ready || amount != nil {
+		t.Errorf("ready=%v amount=%v", ready, amount)
+	}
+	ready, amount = OrderSignal(json.RawMessage(`{}`))
+	if ready || amount != nil {
+		t.Errorf("missing fields: ready=%v amount=%v", ready, amount)
+	}
+}
+
 func TestExtractJSONObject(t *testing.T) {
 	raw, err := extractJSONObject("Ось результат:\n```json\n{\"city\": \"Одеса\"}\n```")
 	if err != nil || string(raw) != `{"city": "Одеса"}` {

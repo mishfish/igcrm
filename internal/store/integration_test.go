@@ -146,3 +146,63 @@ func TestFlow(t *testing.T) {
 		t.Errorf("extractions logged: %d", extractions)
 	}
 }
+
+func TestOrderAutoCreate(t *testing.T) {
+	ctx := context.Background()
+	st, db := openTest(t)
+	now := time.Now().UTC()
+
+	if ok, err := st.SaveMessage(ctx, store.Message{
+		MID: "o1", IGSID: "777", Direction: "in", Text: "Беру шаровари M, оформляйте", SentAt: now,
+	}, 0); err != nil || !ok {
+		t.Fatalf("save: %v %v", ok, err)
+	}
+	ids, err := st.ClaimDue(ctx, 10)
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("claim: %v %v", ids, err)
+	}
+	id := ids[0]
+
+	w := &extract.Worker{
+		Store: st, Model: "fake", History: 30, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		LLM: fakeLLM{`{"last_interest":"шаровари M","order_ready":true,"order_amount":850}`},
+	}
+	if err := w.Process(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+
+	var count int
+	var items string
+	var amount float64
+	var autoCreated bool
+	var status string
+	db.QueryRow(`SELECT count(*) FROM orders WHERE contact_id = $1`, id).Scan(&count)
+	if count != 1 {
+		t.Fatalf("want 1 order, got %d", count)
+	}
+	db.QueryRow(`SELECT items, amount, auto_created, status FROM orders WHERE contact_id = $1`, id).
+		Scan(&items, &amount, &autoCreated, &status)
+	if items != "шаровари M" || amount != 850 || !autoCreated || status != "new" {
+		t.Errorf("order: items=%q amount=%v auto=%v status=%q", items, amount, autoCreated, status)
+	}
+
+	// той самий сигнал на наступному debounce-циклі не плодить дублікат
+	if err := w.Process(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	db.QueryRow(`SELECT count(*) FROM orders WHERE contact_id = $1`, id).Scan(&count)
+	if count != 1 {
+		t.Errorf("duplicate order created: count=%d", count)
+	}
+
+	// замовлення просунулось далі (paid) → новий order_ready створює нове замовлення
+	db.Exec(`UPDATE orders SET status = 'paid' WHERE contact_id = $1`, id)
+	w.LLM = fakeLLM{`{"last_interest":"футболка L","order_ready":true,"order_amount":500}`}
+	if err := w.Process(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	db.QueryRow(`SELECT count(*) FROM orders WHERE contact_id = $1`, id).Scan(&count)
+	if count != 2 {
+		t.Errorf("want 2 orders after previous one was paid, got %d", count)
+	}
+}
