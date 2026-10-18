@@ -84,7 +84,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, igc *ig.Clie
 		} else {
 			llm = &extract.LLM{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, Model: cfg.LLMModel}
 		}
-		go (&extract.Worker{Store: st, LLM: llm, Model: cfg.LLMModel, History: cfg.ExtractHistory, Log: log}).Run(ctx)
+		go (&extract.Worker{Store: st, LLM: llm, Model: cfg.LLMModel, History: cfg.ExtractHistory, Log: log, Notify: n}).Run(ctx)
 		log.Info("extraction enabled", "provider", cfg.LLMProvider, "model", cfg.LLMModel)
 	} else {
 		log.Warn("extraction disabled: задай LLM_MODEL і LLM_API_KEY (claude) або LLM_BASE_URL (openai-сумісний)")

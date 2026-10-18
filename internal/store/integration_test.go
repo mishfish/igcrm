@@ -47,6 +47,12 @@ func (f fakeLLM) Complete(context.Context, string, string) (json.RawMessage, err
 	return json.RawMessage(f.out), nil
 }
 
+type fakeNotifier struct{ alerts []string }
+
+func (n *fakeNotifier) Alert(_ context.Context, text string) {
+	n.alerts = append(n.alerts, text)
+}
+
 func TestFlow(t *testing.T) {
 	ctx := context.Background()
 	st, db := openTest(t)
@@ -163,12 +169,17 @@ func TestOrderAutoCreate(t *testing.T) {
 	}
 	id := ids[0]
 
+	notifier := &fakeNotifier{}
 	w := &extract.Worker{
 		Store: st, Model: "fake", History: 30, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		LLM: fakeLLM{`{"last_interest":"шаровари M","order_ready":true,"order_amount":850,"payment_type":"partial_prepay"}`},
+		LLM:    fakeLLM{`{"last_interest":"шаровари M","order_ready":true,"order_amount":850,"payment_type":"partial_prepay"}`},
+		Notify: notifier,
 	}
 	if err := w.Process(ctx, id); err != nil {
 		t.Fatal(err)
+	}
+	if len(notifier.alerts) != 1 {
+		t.Errorf("want 1 alert, got %v", notifier.alerts)
 	}
 
 	var count int
