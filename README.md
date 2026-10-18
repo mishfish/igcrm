@@ -99,9 +99,10 @@ Worth knowing:
 
 When the model sees an explicit "yes, I'll take it" in the conversation (not just interest or a price
 question), it creates an `orders` row for you: item/size from `last_interest`, amount if a sum was
-stated, recipient fields filled in from the card as usual. The row is marked `auto_created = true` and
-starts in status `new`, same as if you'd entered it by hand — **payment is never set automatically**,
-you still mark `paid` yourself once you've actually confirmed it.
+stated, `payment_type` if discussed (`full_prepay` / `partial_prepay`, e.g. 50/50 / `cod`), recipient
+fields filled in from the card as usual. The row is marked `auto_created = true` and starts in status
+`new`, same as if you'd entered it by hand — **payment is never set automatically**, you still mark
+`paid` yourself once you've actually confirmed it.
 
 To avoid duplicate orders while a conversation keeps going, a new one is only auto-created if the
 customer has no order currently sitting in `new` / `awaiting_payment`. Once you move an order past

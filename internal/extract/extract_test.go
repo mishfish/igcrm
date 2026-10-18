@@ -72,17 +72,22 @@ func TestDiff(t *testing.T) {
 }
 
 func TestOrderSignal(t *testing.T) {
-	ready, amount := OrderSignal(json.RawMessage(`{"order_ready": true, "order_amount": 850}`))
-	if !ready || amount == nil || *amount != 850 {
-		t.Errorf("ready=%v amount=%v", ready, amount)
+	ready, amount, pt := OrderSignal(json.RawMessage(`{"order_ready": true, "order_amount": 850, "payment_type": "partial_prepay"}`))
+	if !ready || amount == nil || *amount != 850 || pt != "partial_prepay" {
+		t.Errorf("ready=%v amount=%v payment_type=%q", ready, amount, pt)
 	}
-	ready, amount = OrderSignal(json.RawMessage(`{"order_ready": false, "order_amount": null}`))
-	if ready || amount != nil {
-		t.Errorf("ready=%v amount=%v", ready, amount)
+	ready, amount, pt = OrderSignal(json.RawMessage(`{"order_ready": false, "order_amount": null, "payment_type": null}`))
+	if ready || amount != nil || pt != "" {
+		t.Errorf("ready=%v amount=%v payment_type=%q", ready, amount, pt)
 	}
-	ready, amount = OrderSignal(json.RawMessage(`{}`))
-	if ready || amount != nil {
-		t.Errorf("missing fields: ready=%v amount=%v", ready, amount)
+	ready, amount, pt = OrderSignal(json.RawMessage(`{}`))
+	if ready || amount != nil || pt != "" {
+		t.Errorf("missing fields: ready=%v amount=%v payment_type=%q", ready, amount, pt)
+	}
+	// значення поза білим списком (CHECK у БД) ігнорується, а не передається далі
+	_, _, pt = OrderSignal(json.RawMessage(`{"payment_type": "crypto"}`))
+	if pt != "" {
+		t.Errorf("unexpected payment_type passthrough: %q", pt)
 	}
 }
 

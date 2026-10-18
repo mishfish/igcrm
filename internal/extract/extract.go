@@ -23,7 +23,9 @@ const SystemPrompt = `Ти витягуєш дані клієнта з пере�
   "sizes":         розміри клієнта, коротко, напр. "одяг M, взуття 38",
   "last_interest": що клієнт хоче купити/замовив останнім, коротко, до 80 символів,
   "order_ready":   true / false,
-  "order_amount":  сума замовлення в грн, якщо прямо названа в переписці, інакше null
+  "order_amount":  сума замовлення в грн, якщо прямо названа в переписці, інакше null,
+  "payment_type":  "full_prepay" (повна передоплата) / "partial_prepay" (часткова, напр. 50/50) /
+                    "cod" (оплата при отриманні, накладений платіж) / null, якщо не обговорювали
 }
 
 Правила:
@@ -106,16 +108,24 @@ func normalizeBranch(v string) string {
 	return "Відділення №" + m[3]
 }
 
-// OrderSignal читає з результату LLM ознаку готовності замовлення й суму (якщо названа).
-func OrderSignal(result json.RawMessage) (ready bool, amount *float64) {
+// paymentTypes — дозволені значення payment_type (мають співпадати з CHECK у БД).
+var paymentTypes = map[string]bool{"full_prepay": true, "partial_prepay": true, "cod": true}
+
+// OrderSignal читає з результату LLM ознаку готовності замовлення, суму (якщо названа)
+// і тип оплати (якщо модель повернула щось поза білим списком — ігноруємо, щоб не впасти на CHECK у БД).
+func OrderSignal(result json.RawMessage) (ready bool, amount *float64, paymentType string) {
 	var r struct {
 		OrderReady  bool     `json:"order_ready"`
 		OrderAmount *float64 `json:"order_amount"`
+		PaymentType string   `json:"payment_type"`
 	}
 	if err := json.Unmarshal(result, &r); err != nil {
-		return false, nil
+		return false, nil, ""
 	}
-	return r.OrderReady, r.OrderAmount
+	if !paymentTypes[r.PaymentType] {
+		r.PaymentType = ""
+	}
+	return r.OrderReady, r.OrderAmount, r.PaymentType
 }
 
 // Diff порівнює результат LLM з карткою; повертає лише реальні зміни.
@@ -161,7 +171,7 @@ type Store interface {
 	Contact(ctx context.Context, id int64) (store.Contact, error)
 	RecentMessages(ctx context.Context, contactID int64, n int) ([]store.ChatLine, error)
 	ApplyExtraction(ctx context.Context, id int64, model string, result json.RawMessage, changes map[string]store.Change) error
-	CreateOrderIfNone(ctx context.Context, contactID int64, items string, amount *float64) (orderID int64, created bool, err error)
+	CreateOrderIfNone(ctx context.Context, contactID int64, items string, amount *float64, paymentType string) (orderID int64, created bool, err error)
 }
 
 type Completer interface {
@@ -246,13 +256,13 @@ func (w *Worker) Process(ctx context.Context, id int64) error {
 		w.Log.Info("contact updated", "contact", id, "username", c.Username, "fields", fields)
 	}
 
-	if ready, amount := OrderSignal(result); ready {
+	if ready, amount, paymentType := OrderSignal(result); ready {
 		items := c.Values["last_interest"]
 		if ch, ok := changes["last_interest"]; ok {
 			items = ch.New
 		}
 		if items != "" {
-			orderID, created, err := w.Store.CreateOrderIfNone(ctx, id, items, amount)
+			orderID, created, err := w.Store.CreateOrderIfNone(ctx, id, items, amount, paymentType)
 			if err != nil {
 				w.Log.Error("order auto-create", "contact", id, "err", err)
 			} else if created {

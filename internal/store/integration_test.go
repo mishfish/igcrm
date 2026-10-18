@@ -165,7 +165,7 @@ func TestOrderAutoCreate(t *testing.T) {
 
 	w := &extract.Worker{
 		Store: st, Model: "fake", History: 30, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		LLM: fakeLLM{`{"last_interest":"шаровари M","order_ready":true,"order_amount":850}`},
+		LLM: fakeLLM{`{"last_interest":"шаровари M","order_ready":true,"order_amount":850,"payment_type":"partial_prepay"}`},
 	}
 	if err := w.Process(ctx, id); err != nil {
 		t.Fatal(err)
@@ -175,15 +175,15 @@ func TestOrderAutoCreate(t *testing.T) {
 	var items string
 	var amount float64
 	var autoCreated bool
-	var status string
+	var status, paymentType string
 	db.QueryRow(`SELECT count(*) FROM orders WHERE contact_id = $1`, id).Scan(&count)
 	if count != 1 {
 		t.Fatalf("want 1 order, got %d", count)
 	}
-	db.QueryRow(`SELECT items, amount, auto_created, status FROM orders WHERE contact_id = $1`, id).
-		Scan(&items, &amount, &autoCreated, &status)
-	if items != "шаровари M" || amount != 850 || !autoCreated || status != "new" {
-		t.Errorf("order: items=%q amount=%v auto=%v status=%q", items, amount, autoCreated, status)
+	db.QueryRow(`SELECT items, amount, auto_created, status, payment_type FROM orders WHERE contact_id = $1`, id).
+		Scan(&items, &amount, &autoCreated, &status, &paymentType)
+	if items != "шаровари M" || amount != 850 || !autoCreated || status != "new" || paymentType != "partial_prepay" {
+		t.Errorf("order: items=%q amount=%v auto=%v status=%q payment_type=%q", items, amount, autoCreated, status, paymentType)
 	}
 
 	// той самий сигнал на наступному debounce-циклі не плодить дублікат

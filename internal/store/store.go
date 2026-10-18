@@ -313,17 +313,17 @@ func (s *Store) ApplyExtraction(ctx context.Context, id int64, model string, res
 // зараз немає жодного відкритого (new/awaiting_payment) — щоб той самий сигнал від LLM
 // не плодив дублікати на кожному debounce-циклі, поки клієнт ще щось дописує.
 // Дані отримувача (ПІБ/телефон/місто/відділення) підтягуються тригером orders_fill з картки.
-func (s *Store) CreateOrderIfNone(ctx context.Context, contactID int64, items string, amount *float64) (orderID int64, created bool, err error) {
+func (s *Store) CreateOrderIfNone(ctx context.Context, contactID int64, items string, amount *float64, paymentType string) (orderID int64, created bool, err error) {
 	var amt any
 	if amount != nil {
 		amt = *amount
 	}
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO orders (contact_id, items, amount, auto_created)
-		SELECT $1, NULLIF($2, ''), $3, true
+		INSERT INTO orders (contact_id, items, amount, payment_type, auto_created)
+		SELECT $1, NULLIF($2, ''), $3, NULLIF($4, ''), true
 		WHERE NOT EXISTS (
 			SELECT 1 FROM orders WHERE contact_id = $1 AND status IN ('new', 'awaiting_payment'))
-		RETURNING id`, contactID, items, amt).Scan(&orderID)
+		RETURNING id`, contactID, items, amt, paymentType).Scan(&orderID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
