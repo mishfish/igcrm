@@ -1,0 +1,16 @@
+# Один домен, один сертифікат Let's Encrypt (Caddy отримує й продовжує сам).
+#   https://DOMAIN/ig/webhook  → Go-сервіс (сюди стукає Meta)
+#   https://DOMAIN/            → Directus (адмінка з логіном)
+{$DOMAIN} {
+	encode gzip
+
+	handle /ig/* {
+		reverse_proxy igcrm:8080
+	}
+	handle /healthz {
+		reverse_proxy igcrm:8080
+	}
+	handle {
+		reverse_proxy directus:8055
+	}
+}

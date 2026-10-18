@@ -1,0 +1,76 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: crm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: crm
+      TZ: Europe/Kyiv
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm -d crm"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  igcrm:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://crm:${POSTGRES_PASSWORD}@postgres:5432/crm?sslmode=disable
+      TZ: Europe/Kyiv
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  directus:
+    image: directus/directus:11
+    restart: unless-stopped
+    environment:
+      KEY: ${DIRECTUS_KEY:?set in .env}
+      SECRET: ${DIRECTUS_SECRET:?set in .env}
+      PUBLIC_URL: https://${DOMAIN}
+      DB_CLIENT: pg
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: crm
+      DB_USER: crm
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      ADMIN_EMAIL: ${DIRECTUS_ADMIN_EMAIL:?set in .env}
+      ADMIN_PASSWORD: ${DIRECTUS_ADMIN_PASSWORD:?set in .env}
+      TZ: Europe/Kyiv
+    volumes:
+      - directus_uploads:/directus/uploads
+      - directus_extensions:/directus/extensions
+    depends_on:
+      postgres:
+        condition: service_healthy
+      igcrm:
+        condition: service_started
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - igcrm
+      - directus
+
+volumes:
+  pgdata:
+  directus_uploads:
+  directus_extensions:
+  caddy_data:
+  caddy_config:
