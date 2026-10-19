@@ -119,12 +119,16 @@ func TestFlow(t *testing.T) {
 
 	// замовлення підтягує отримувача з картки
 	var name, phone, branch string
+	var sizes sql.NullString
 	if err := db.QueryRow(`INSERT INTO orders (contact_id, items, amount) VALUES ($1, 'сукня M', 1200)
-		RETURNING full_name, phone, np_branch`, ids[0]).Scan(&name, &phone, &branch); err != nil {
+		RETURNING full_name, phone, np_branch, sizes`, ids[0]).Scan(&name, &phone, &branch, &sizes); err != nil {
 		t.Fatal(err)
 	}
 	if name != "Петренко Олена" || phone != "+380671234567" || branch != "Відділення №45" {
 		t.Errorf("order recipient: %q %q %q", name, phone, branch)
+	}
+	if sizes.String != "M" {
+		t.Errorf("order sizes: %q, want M (from card)", sizes.String)
 	}
 
 	// токен: seed не перезаписує існуючий, force — перезаписує

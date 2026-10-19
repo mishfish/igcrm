@@ -12,7 +12,7 @@ You keep chatting with customers as usual, from your phone. The service:
 6. refreshes the Instagram token itself and sends a Telegram alert if it fails.
 
 You manage orders in Directus: pick the customer, enter the item and amount — name/phone/branch
-are filled in automatically from the card.
+and sizes are filled in automatically from the card.
 
 ```
 Instagram ─webhook─▶ igcrm (Go) ─▶ Postgres ◀─ Directus (UI)
@@ -100,7 +100,7 @@ Worth knowing:
 When the model sees an explicit "yes, I'll take it" in the conversation (not just interest or a price
 question), it creates an `orders` row for you: item/size from `last_interest`, amount if a sum was
 stated, `payment_type` if discussed (`full_prepay` / `partial_prepay`, e.g. 50/50 / `cod`), recipient
-fields filled in from the card as usual. The row is marked `auto_created = true` and starts in status
+fields and sizes filled in from the card as usual. The row is marked `auto_created = true` and starts in status
 `new`, same as if you'd entered it by hand — **payment is never set automatically**, you still mark
 `paid` yourself once you've actually confirmed it.
 
