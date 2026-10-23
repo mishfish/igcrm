@@ -13,6 +13,8 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+
+	"igcrm/internal/shipping"
 )
 
 //go:embed migrations/*.sql
@@ -331,6 +333,53 @@ func (s *Store) CreateOrderIfNone(ctx context.Context, contactID int64, items st
 		return 0, false, err
 	}
 	return orderID, true, nil
+}
+
+// OrderForShipping читає дані замовлення, потрібні для створення ТТН у Новій Пошті.
+func (s *Store) OrderForShipping(ctx context.Context, id int64) (shipping.Order, error) {
+	var o shipping.Order
+	var fullName, phone, city, npBranch, paymentType sql.NullString
+	var amount sql.NullFloat64
+	var ttn sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT full_name, phone, city, np_branch, amount, payment_type, ttn
+		FROM orders WHERE id = $1`, id).
+		Scan(&fullName, &phone, &city, &npBranch, &amount, &paymentType, &ttn)
+	if errors.Is(err, sql.ErrNoRows) {
+		return o, fmt.Errorf("order %d not found", id)
+	}
+	if err != nil {
+		return o, err
+	}
+	o = shipping.Order{
+		ID:          id,
+		FullName:    fullName.String,
+		Phone:       phone.String,
+		City:        city.String,
+		NPBranch:    npBranch.String,
+		PaymentType: paymentType.String,
+	}
+	if amount.Valid {
+		o.Amount = &amount.Float64
+	}
+	if ttn.Valid && ttn.String != "" {
+		o.TTN = &ttn.String
+	}
+	return o, nil
+}
+
+// SetOrderTTN записує номер ТТН і переводить замовлення в статус "shipped".
+// Якщо в замовлення вже є ТТН (повторний клік) — нічого не змінює й повертає помилку.
+func (s *Store) SetOrderTTN(ctx context.Context, id int64, ttn string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE orders SET ttn = $2, status = 'shipped' WHERE id = $1 AND ttn IS NULL`, id, ttn)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("order %d not found or already has a ttn", id)
+	}
+	return nil
 }
 
 // ---------- profiles ----------

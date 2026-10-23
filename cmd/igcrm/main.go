@@ -16,6 +16,8 @@ import (
 	"igcrm/internal/ig"
 	"igcrm/internal/jobs"
 	"igcrm/internal/notify"
+	"igcrm/internal/np"
+	"igcrm/internal/shipping"
 	"igcrm/internal/store"
 )
 
@@ -99,6 +101,22 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, igc *ig.Clie
 		Log:         log,
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+
+	if cfg.NPAPIKey != "" {
+		shippingHandler := &shipping.Handler{
+			Service: &shipping.Service{
+				Store:             st,
+				NP:                &np.Client{APIKey: cfg.NPAPIKey},
+				SenderCity:        cfg.NPSenderCity,
+				SenderWarehouseNo: cfg.NPSenderWarehouseNo,
+			},
+			Log: log,
+		}
+		mux.HandleFunc("POST /orders/{id}/ttn", shippingHandler.CreateTTN)
+		log.Info("nova poshta ttn enabled", "sender_city", cfg.NPSenderCity, "sender_warehouse", cfg.NPSenderWarehouseNo)
+	} else {
+		log.Warn("nova poshta ttn disabled: задай NP_API_KEY")
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

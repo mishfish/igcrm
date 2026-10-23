@@ -221,3 +221,62 @@ func TestOrderAutoCreate(t *testing.T) {
 		t.Errorf("want 2 orders after previous one was paid, got %d", count)
 	}
 }
+
+func TestOrderForShippingAndSetTTN(t *testing.T) {
+	ctx := context.Background()
+	st, db := openTest(t)
+
+	var contactID int64
+	if err := db.QueryRow(`
+		INSERT INTO contacts (igsid, full_name, phone, city, np_branch)
+		VALUES ('999', 'Іваненко Іван', '+380671234567', 'Київ', 'Відділення №45')
+		RETURNING id`).Scan(&contactID); err != nil {
+		t.Fatal(err)
+	}
+	var orderID int64
+	if err := db.QueryRow(`
+		INSERT INTO orders (contact_id, amount, payment_type) VALUES ($1, 850, 'cod') RETURNING id`,
+		contactID).Scan(&orderID); err != nil {
+		t.Fatal(err)
+	}
+
+	order, err := st.OrderForShipping(ctx, orderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.FullName != "Іваненко Іван" || order.Phone != "+380671234567" ||
+		order.City != "Київ" || order.NPBranch != "Відділення №45" || order.PaymentType != "cod" {
+		t.Errorf("order for shipping: %+v", order)
+	}
+	if order.Amount == nil || *order.Amount != 850 {
+		t.Errorf("order amount: %v", order.Amount)
+	}
+	if order.TTN != nil {
+		t.Errorf("fresh order must not have a ttn yet, got %v", order.TTN)
+	}
+
+	if err := st.SetOrderTTN(ctx, orderID, "20450000000001"); err != nil {
+		t.Fatal(err)
+	}
+	order, err = st.OrderForShipping(ctx, orderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.TTN == nil || *order.TTN != "20450000000001" {
+		t.Errorf("ttn not saved: %v", order.TTN)
+	}
+	var status string
+	db.QueryRow(`SELECT status FROM orders WHERE id = $1`, orderID).Scan(&status)
+	if status != "shipped" {
+		t.Errorf("status = %q, want shipped", status)
+	}
+
+	// повторний виклик на вже відправленому замовленні — помилка, без перезапису
+	if err := st.SetOrderTTN(ctx, orderID, "20450000000002"); err == nil {
+		t.Fatal("expected error when ttn already set")
+	}
+	db.QueryRow(`SELECT ttn FROM orders WHERE id = $1`, orderID).Scan(&status)
+	if status != "20450000000001" {
+		t.Errorf("ttn overwritten on second call: %q", status)
+	}
+}

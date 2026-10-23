@@ -30,26 +30,34 @@ type Config struct {
 	// Telegram-алерти (опційно)
 	TGBotToken string
 	TGChatID   string
+
+	// Нова Пошта: створення ТТН (опційно — без ключа кнопка в Directus повертає помилку)
+	NPAPIKey            string
+	NPSenderCity        string
+	NPSenderWarehouseNo string
 }
 
 func Load() (Config, error) {
 	c := Config{
-		ListenAddr:         env("LISTEN_ADDR", ":8080"),
-		DatabaseURL:        os.Getenv("DATABASE_URL"),
-		IGAppSecret:        os.Getenv("IG_APP_SECRET"),
-		IGVerifyToken:      os.Getenv("IG_VERIFY_TOKEN"),
-		IGAccessToken:      os.Getenv("IG_ACCESS_TOKEN"),
-		IGForceToken:       os.Getenv("IG_ACCESS_TOKEN_FORCE") == "1",
-		IGAPIVersion:       env("IG_API_VERSION", "v23.0"),
-		IGRefreshThreshold: dur("IG_REFRESH_THRESHOLD", 15*24*time.Hour),
-		LLMProvider:        env("LLM_PROVIDER", "openai"),
-		LLMBaseURL:         strings.TrimRight(os.Getenv("LLM_BASE_URL"), "/"),
-		LLMAPIKey:          os.Getenv("LLM_API_KEY"),
-		LLMModel:           os.Getenv("LLM_MODEL"),
-		ExtractDebounce:    dur("EXTRACT_DEBOUNCE", 3*time.Minute),
-		ExtractHistory:     intEnv("EXTRACT_HISTORY", 30),
-		TGBotToken:         os.Getenv("TG_BOT_TOKEN"),
-		TGChatID:           os.Getenv("TG_CHAT_ID"),
+		ListenAddr:          env("LISTEN_ADDR", ":8080"),
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		IGAppSecret:         os.Getenv("IG_APP_SECRET"),
+		IGVerifyToken:       os.Getenv("IG_VERIFY_TOKEN"),
+		IGAccessToken:       os.Getenv("IG_ACCESS_TOKEN"),
+		IGForceToken:        os.Getenv("IG_ACCESS_TOKEN_FORCE") == "1",
+		IGAPIVersion:        env("IG_API_VERSION", "v23.0"),
+		IGRefreshThreshold:  dur("IG_REFRESH_THRESHOLD", 15*24*time.Hour),
+		LLMProvider:         env("LLM_PROVIDER", "openai"),
+		LLMBaseURL:          strings.TrimRight(os.Getenv("LLM_BASE_URL"), "/"),
+		LLMAPIKey:           os.Getenv("LLM_API_KEY"),
+		LLMModel:            os.Getenv("LLM_MODEL"),
+		ExtractDebounce:     dur("EXTRACT_DEBOUNCE", 3*time.Minute),
+		ExtractHistory:      intEnv("EXTRACT_HISTORY", 30),
+		TGBotToken:          os.Getenv("TG_BOT_TOKEN"),
+		TGChatID:            os.Getenv("TG_CHAT_ID"),
+		NPAPIKey:            os.Getenv("NP_API_KEY"),
+		NPSenderCity:        env("NP_SENDER_CITY", "Одеса"),
+		NPSenderWarehouseNo: env("NP_SENDER_WAREHOUSE_NO", "143"),
 	}
 	var missing []string
 	for k, v := range map[string]string{
