@@ -11,35 +11,53 @@ type fakeStore struct {
 	order    Order
 	getErr   error
 	setErr   error
+	clearErr error
 	setCalls []struct {
-		id  int64
-		ttn string
+		id     int64
+		ttn    string
+		docRef string
 	}
+	clearCalls []int64
 }
 
 func (f *fakeStore) OrderForShipping(ctx context.Context, id int64) (Order, error) {
 	return f.order, f.getErr
 }
 
-func (f *fakeStore) SetOrderTTN(ctx context.Context, id int64, ttn string) error {
+func (f *fakeStore) SetOrderTTN(ctx context.Context, id int64, ttn, docRef string) error {
 	f.setCalls = append(f.setCalls, struct {
-		id  int64
-		ttn string
-	}{id, ttn})
+		id     int64
+		ttn    string
+		docRef string
+	}{id, ttn, docRef})
 	return f.setErr
 }
 
-type fakeNP struct {
-	req    np.WaybillRequest
-	ttn    string
-	err    error
-	called bool
+func (f *fakeStore) ClearOrderTTN(ctx context.Context, id int64) error {
+	f.clearCalls = append(f.clearCalls, id)
+	return f.clearErr
 }
 
-func (f *fakeNP) CreateWaybill(ctx context.Context, req np.WaybillRequest) (string, error) {
+type fakeNP struct {
+	req          np.WaybillRequest
+	ttn, docRef  string
+	err          error
+	called       bool
+	deletedRef   string
+	deleteCalled bool
+	deleteErr    error
+}
+
+func (f *fakeNP) CreateWaybill(ctx context.Context, req np.WaybillRequest) (string, string, error) {
 	f.called = true
 	f.req = req
-	return f.ttn, f.err
+	return f.ttn, f.docRef, f.err
+}
+
+func (f *fakeNP) DeleteWaybill(ctx context.Context, docRef string) error {
+	f.deleteCalled = true
+	f.deletedRef = docRef
+	return f.deleteErr
 }
 
 func amountPtr(v float64) *float64 { return &v }
@@ -58,7 +76,7 @@ func baseOrder() Order {
 
 func TestCreateTTN_Success(t *testing.T) {
 	st := &fakeStore{order: baseOrder()}
-	nc := &fakeNP{ttn: "20450000000001"}
+	nc := &fakeNP{ttn: "20450000000001", docRef: "doc-ref-1"}
 	svc := &Service{Store: st, NP: nc, SenderCity: "Одеса", SenderWarehouseNo: "143"}
 
 	ttn, err := svc.CreateTTN(context.Background(), 42, 1.2, 0)
@@ -83,8 +101,8 @@ func TestCreateTTN_Success(t *testing.T) {
 	if nc.req.CashOnDelivery != 0 {
 		t.Fatalf("expected no cash on delivery for full_prepay, got %v", nc.req.CashOnDelivery)
 	}
-	if len(st.setCalls) != 1 || st.setCalls[0].id != 42 || st.setCalls[0].ttn != "20450000000001" {
-		t.Fatalf("expected SetOrderTTN(42, ttn) to be called once, got %+v", st.setCalls)
+	if len(st.setCalls) != 1 || st.setCalls[0].id != 42 || st.setCalls[0].ttn != "20450000000001" || st.setCalls[0].docRef != "doc-ref-1" {
+		t.Fatalf("expected SetOrderTTN(42, ttn, docRef) to be called once, got %+v", st.setCalls)
 	}
 }
 
@@ -146,5 +164,43 @@ func TestCreateTTN_DeclaredValueOverridesOrderAmount(t *testing.T) {
 	}
 	if nc.req.DeclaredValue != 500 {
 		t.Fatalf("expected explicit declared value 500 to win, got %v", nc.req.DeclaredValue)
+	}
+}
+
+func shippedOrder() Order {
+	order := baseOrder()
+	ttn := "20450000000001"
+	docRef := "doc-ref-1"
+	order.TTN = &ttn
+	order.NPDocRef = &docRef
+	return order
+}
+
+func TestDeleteTTN_Success(t *testing.T) {
+	st := &fakeStore{order: shippedOrder()}
+	nc := &fakeNP{}
+	svc := &Service{Store: st, NP: nc}
+
+	if err := svc.DeleteTTN(context.Background(), 42); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !nc.deleteCalled || nc.deletedRef != "doc-ref-1" {
+		t.Fatalf("expected DeleteWaybill(doc-ref-1) to be called, got called=%v ref=%q", nc.deleteCalled, nc.deletedRef)
+	}
+	if len(st.clearCalls) != 1 || st.clearCalls[0] != 42 {
+		t.Fatalf("expected ClearOrderTTN(42) to be called once, got %+v", st.clearCalls)
+	}
+}
+
+func TestDeleteTTN_NoTTNReturnsError(t *testing.T) {
+	st := &fakeStore{order: baseOrder()} // без ttn
+	nc := &fakeNP{}
+	svc := &Service{Store: st, NP: nc}
+
+	if err := svc.DeleteTTN(context.Background(), 42); err == nil {
+		t.Fatal("expected error when order has no ttn to delete")
+	}
+	if nc.deleteCalled {
+		t.Fatal("np client must not be called when order has no ttn")
 	}
 }

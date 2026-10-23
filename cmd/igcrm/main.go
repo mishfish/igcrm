@@ -113,6 +113,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, igc *ig.Clie
 			Log: log,
 		}
 		mux.HandleFunc("POST /orders/{id}/ttn", shippingHandler.CreateTTN)
+		mux.HandleFunc("DELETE /orders/{id}/ttn", shippingHandler.DeleteTTN)
 		log.Info("nova poshta ttn enabled", "sender_city", cfg.NPSenderCity, "sender_warehouse", cfg.NPSenderWarehouseNo)
 	} else {
 		log.Warn("nova poshta ttn disabled: задай NP_API_KEY")

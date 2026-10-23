@@ -79,7 +79,7 @@ func TestCreateWaybill_PrepaidOrder(t *testing.T) {
 	var sentProps map[string]any
 	c := newTestClient(t, npServer(t, func(props map[string]any) { sentProps = props }))
 
-	ttn, err := c.CreateWaybill(context.Background(), WaybillRequest{
+	ttn, docRef, err := c.CreateWaybill(context.Background(), WaybillRequest{
 		SenderCityName:       "Одеса",
 		SenderWarehouseNo:    "143",
 		RecipientFullName:    "Іваненко Іван",
@@ -95,6 +95,9 @@ func TestCreateWaybill_PrepaidOrder(t *testing.T) {
 	}
 	if ttn != "20450000000001" {
 		t.Fatalf("expected ttn 20450000000001, got %q", ttn)
+	}
+	if docRef != "doc-ref-1" {
+		t.Fatalf("expected doc ref doc-ref-1, got %q", docRef)
 	}
 	if _, ok := sentProps["BackwardDeliveryData"]; ok {
 		t.Fatalf("prepaid order must not include BackwardDeliveryData, got %v", sentProps["BackwardDeliveryData"])
@@ -114,7 +117,7 @@ func TestCreateWaybill_CashOnDeliveryIncludesBackwardDeliveryData(t *testing.T) 
 	var sentProps map[string]any
 	c := newTestClient(t, npServer(t, func(props map[string]any) { sentProps = props }))
 
-	_, err := c.CreateWaybill(context.Background(), WaybillRequest{
+	_, _, err := c.CreateWaybill(context.Background(), WaybillRequest{
 		SenderCityName:       "Одеса",
 		SenderWarehouseNo:    "143",
 		RecipientFullName:    "Іваненко Іван",
@@ -140,5 +143,37 @@ func TestCreateWaybill_CashOnDeliveryIncludesBackwardDeliveryData(t *testing.T) 
 	}
 	if len(backward) != 1 || backward[0]["PayerType"] != "Recipient" || backward[0]["CargoType"] != "Money" || backward[0]["RedeliveryString"] != "850" {
 		t.Fatalf("unexpected BackwardDeliveryData: %+v", backward)
+	}
+}
+
+func TestDeleteWaybill_Success(t *testing.T) {
+	var sentProps map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		req := decodeRequest(t, r)
+		if req.ModelName != "InternetDocument" || req.CalledMethod != "delete" {
+			t.Fatalf("unexpected call: %+v", req)
+		}
+		sentProps = req.MethodProperties
+		writeJSON(t, w, map[string]any{"success": true, "data": []map[string]string{
+			{"Ref": "doc-ref-1"},
+		}})
+	})
+
+	if err := c.DeleteWaybill(context.Background(), "doc-ref-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	docs, ok := sentProps["Documents"].([]any)
+	if !ok || len(docs) != 1 || docs[0] != "doc-ref-1" {
+		t.Fatalf("expected Documents=[doc-ref-1], got %v", sentProps["Documents"])
+	}
+}
+
+func TestDeleteWaybill_APIErrorReturnsError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{"success": false, "errors": []string{"Document not found"}})
+	})
+
+	if err := c.DeleteWaybill(context.Background(), "bad-ref"); err == nil {
+		t.Fatal("expected error when NP API reports failure")
 	}
 }

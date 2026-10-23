@@ -20,17 +20,20 @@ type Order struct {
 	Amount      *float64
 	PaymentType string // full_prepay | partial_prepay | cod
 	TTN         *string
+	NPDocRef    *string // внутрішній Ref документа НП, потрібен лише для скасування
 }
 
 // Store — те, що Service потребує від БД.
 type Store interface {
 	OrderForShipping(ctx context.Context, id int64) (Order, error)
-	SetOrderTTN(ctx context.Context, id int64, ttn string) error
+	SetOrderTTN(ctx context.Context, id int64, ttn, docRef string) error
+	ClearOrderTTN(ctx context.Context, id int64) error
 }
 
 // NPClient — те, що Service потребує від клієнта Нової Пошти.
 type NPClient interface {
-	CreateWaybill(ctx context.Context, req np.WaybillRequest) (string, error)
+	CreateWaybill(ctx context.Context, req np.WaybillRequest) (ttn, docRef string, err error)
+	DeleteWaybill(ctx context.Context, docRef string) error
 }
 
 // Service створює ТТН для замовлення.
@@ -83,7 +86,7 @@ func (s *Service) CreateTTN(ctx context.Context, orderID int64, weight, declared
 		cod = *order.Amount
 	}
 
-	ttn, err := s.NP.CreateWaybill(ctx, np.WaybillRequest{
+	ttn, docRef, err := s.NP.CreateWaybill(ctx, np.WaybillRequest{
 		SenderCityName:       s.SenderCity,
 		SenderWarehouseNo:    s.SenderWarehouseNo,
 		RecipientFullName:    order.FullName,
@@ -98,8 +101,28 @@ func (s *Service) CreateTTN(ctx context.Context, orderID int64, weight, declared
 		return "", fmt.Errorf("створення ТТН: %w", err)
 	}
 
-	if err := s.Store.SetOrderTTN(ctx, orderID, ttn); err != nil {
+	if err := s.Store.SetOrderTTN(ctx, orderID, ttn, docRef); err != nil {
 		return "", fmt.Errorf("збереження ТТН: %w", err)
 	}
 	return ttn, nil
+}
+
+// DeleteTTN скасовує ТТН замовлення (поки посилку не занесли на відділення) і
+// очищає ttn/np_doc_ref в БД.
+func (s *Service) DeleteTTN(ctx context.Context, orderID int64) error {
+	order, err := s.Store.OrderForShipping(ctx, orderID)
+	if err != nil {
+		return fmt.Errorf("замовлення: %w", err)
+	}
+	if order.TTN == nil || *order.TTN == "" || order.NPDocRef == nil || *order.NPDocRef == "" {
+		return fmt.Errorf("замовлення №%d: немає ТТН для скасування", orderID)
+	}
+
+	if err := s.NP.DeleteWaybill(ctx, *order.NPDocRef); err != nil {
+		return fmt.Errorf("скасування ТТН: %w", err)
+	}
+	if err := s.Store.ClearOrderTTN(ctx, orderID); err != nil {
+		return fmt.Errorf("очищення ТТН: %w", err)
+	}
+	return nil
 }

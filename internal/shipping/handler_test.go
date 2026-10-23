@@ -14,7 +14,16 @@ func newTestHandler(svc *Service) http.Handler {
 	mux := http.NewServeMux()
 	h := &Handler{Service: svc, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	mux.HandleFunc("POST /orders/{id}/ttn", h.CreateTTN)
+	mux.HandleFunc("DELETE /orders/{id}/ttn", h.DeleteTTN)
 	return mux
+}
+
+func doDelete(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodDelete, path, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }
 
 func doRequest(t *testing.T, h http.Handler, path, body string) *httptest.ResponseRecorder {
@@ -94,5 +103,32 @@ func TestHandler_NonNumericIDReturns400(t *testing.T) {
 	rec := doRequest(t, h, "/orders/abc/ttn", `{"weight": 1.2}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for non-numeric id, got %d", rec.Code)
+	}
+}
+
+func TestHandler_DeleteSuccess(t *testing.T) {
+	st := &fakeStore{order: shippedOrder()}
+	nc := &fakeNP{}
+	svc := &Service{Store: st, NP: nc}
+	h := newTestHandler(svc)
+
+	rec := doDelete(t, h, "/orders/42/ttn")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !nc.deleteCalled {
+		t.Fatal("expected np client DeleteWaybill to be called")
+	}
+}
+
+func TestHandler_DeleteNoTTNReturns400(t *testing.T) {
+	st := &fakeStore{order: baseOrder()}
+	nc := &fakeNP{}
+	svc := &Service{Store: st, NP: nc}
+	h := newTestHandler(svc)
+
+	rec := doDelete(t, h, "/orders/42/ttn")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

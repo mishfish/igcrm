@@ -254,8 +254,11 @@ func TestOrderForShippingAndSetTTN(t *testing.T) {
 	if order.TTN != nil {
 		t.Errorf("fresh order must not have a ttn yet, got %v", order.TTN)
 	}
+	if order.NPDocRef != nil {
+		t.Errorf("fresh order must not have a np_doc_ref yet, got %v", order.NPDocRef)
+	}
 
-	if err := st.SetOrderTTN(ctx, orderID, "20450000000001"); err != nil {
+	if err := st.SetOrderTTN(ctx, orderID, "20450000000001", "doc-ref-1"); err != nil {
 		t.Fatal(err)
 	}
 	order, err = st.OrderForShipping(ctx, orderID)
@@ -265,6 +268,9 @@ func TestOrderForShippingAndSetTTN(t *testing.T) {
 	if order.TTN == nil || *order.TTN != "20450000000001" {
 		t.Errorf("ttn not saved: %v", order.TTN)
 	}
+	if order.NPDocRef == nil || *order.NPDocRef != "doc-ref-1" {
+		t.Errorf("np_doc_ref not saved: %v", order.NPDocRef)
+	}
 	var status string
 	db.QueryRow(`SELECT status FROM orders WHERE id = $1`, orderID).Scan(&status)
 	if status != "shipped" {
@@ -272,11 +278,28 @@ func TestOrderForShippingAndSetTTN(t *testing.T) {
 	}
 
 	// повторний виклик на вже відправленому замовленні — помилка, без перезапису
-	if err := st.SetOrderTTN(ctx, orderID, "20450000000002"); err == nil {
+	if err := st.SetOrderTTN(ctx, orderID, "20450000000002", "doc-ref-2"); err == nil {
 		t.Fatal("expected error when ttn already set")
 	}
 	db.QueryRow(`SELECT ttn FROM orders WHERE id = $1`, orderID).Scan(&status)
 	if status != "20450000000001" {
 		t.Errorf("ttn overwritten on second call: %q", status)
+	}
+
+	// скасування ТТН прибирає і номер, і внутрішній Ref
+	if err := st.ClearOrderTTN(ctx, orderID); err != nil {
+		t.Fatal(err)
+	}
+	order, err = st.OrderForShipping(ctx, orderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.TTN != nil || order.NPDocRef != nil {
+		t.Errorf("ttn/np_doc_ref not cleared: ttn=%v doc_ref=%v", order.TTN, order.NPDocRef)
+	}
+
+	// повторне скасування вже очищеного замовлення — помилка
+	if err := st.ClearOrderTTN(ctx, orderID); err == nil {
+		t.Fatal("expected error when order has no ttn to clear")
 	}
 }

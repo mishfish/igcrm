@@ -340,11 +340,11 @@ func (s *Store) OrderForShipping(ctx context.Context, id int64) (shipping.Order,
 	var o shipping.Order
 	var fullName, phone, city, npBranch, paymentType sql.NullString
 	var amount sql.NullFloat64
-	var ttn sql.NullString
+	var ttn, npDocRef sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT full_name, phone, city, np_branch, amount, payment_type, ttn
+		SELECT full_name, phone, city, np_branch, amount, payment_type, ttn, np_doc_ref
 		FROM orders WHERE id = $1`, id).
-		Scan(&fullName, &phone, &city, &npBranch, &amount, &paymentType, &ttn)
+		Scan(&fullName, &phone, &city, &npBranch, &amount, &paymentType, &ttn, &npDocRef)
 	if errors.Is(err, sql.ErrNoRows) {
 		return o, fmt.Errorf("order %d not found", id)
 	}
@@ -365,19 +365,37 @@ func (s *Store) OrderForShipping(ctx context.Context, id int64) (shipping.Order,
 	if ttn.Valid && ttn.String != "" {
 		o.TTN = &ttn.String
 	}
+	if npDocRef.Valid && npDocRef.String != "" {
+		o.NPDocRef = &npDocRef.String
+	}
 	return o, nil
 }
 
-// SetOrderTTN записує номер ТТН і переводить замовлення в статус "shipped".
-// Якщо в замовлення вже є ТТН (повторний клік) — нічого не змінює й повертає помилку.
-func (s *Store) SetOrderTTN(ctx context.Context, id int64, ttn string) error {
+// SetOrderTTN записує номер ТТН і внутрішній Ref документа, переводить замовлення
+// в статус "shipped". Якщо в замовлення вже є ТТН (повторний клік) — повертає помилку.
+func (s *Store) SetOrderTTN(ctx context.Context, id int64, ttn, docRef string) error {
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE orders SET ttn = $2, status = 'shipped' WHERE id = $1 AND ttn IS NULL`, id, ttn)
+		UPDATE orders SET ttn = $2, np_doc_ref = $3, status = 'shipped' WHERE id = $1 AND ttn IS NULL`,
+		id, ttn, docRef)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("order %d not found or already has a ttn", id)
+	}
+	return nil
+}
+
+// ClearOrderTTN прибирає ттн/np_doc_ref після скасування накладної (статус лишає
+// як є — користувач сам повертає картку в потрібну колонку Kanban).
+func (s *Store) ClearOrderTTN(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE orders SET ttn = NULL, np_doc_ref = NULL WHERE id = $1 AND ttn IS NOT NULL`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("order %d not found or has no ttn", id)
 	}
 	return nil
 }

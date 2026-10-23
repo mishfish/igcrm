@@ -92,39 +92,40 @@ func (c *Client) ensureRecipient(ctx context.Context, fullName, phone string) (s
 	return created[0].Ref, nil
 }
 
-// CreateWaybill створює ТТН і повертає її номер.
-func (c *Client) CreateWaybill(ctx context.Context, req WaybillRequest) (string, error) {
+// CreateWaybill створює ТТН і повертає її номер (ttn) та внутрішній Ref документа
+// (docRef — потрібен лише для DeleteWaybill, це не те саме, що номер ТТН).
+func (c *Client) CreateWaybill(ctx context.Context, req WaybillRequest) (ttn, docRef string, err error) {
 	senderRef, senderContactRef, senderPhone, err := c.resolveSender(ctx)
 	if err != nil {
-		return "", fmt.Errorf("відправник: %w", err)
+		return "", "", fmt.Errorf("відправник: %w", err)
 	}
 
 	senderCity, err := c.FindCity(ctx, req.SenderCityName)
 	if err != nil {
-		return "", fmt.Errorf("місто відправника: %w", err)
+		return "", "", fmt.Errorf("місто відправника: %w", err)
 	}
 	senderWarehouse, err := c.FindWarehouse(ctx, senderCity.Ref, req.SenderWarehouseNo)
 	if err != nil {
-		return "", fmt.Errorf("відділення відправника: %w", err)
+		return "", "", fmt.Errorf("відділення відправника: %w", err)
 	}
 
 	recipientCity, err := c.FindCity(ctx, req.RecipientCityName)
 	if err != nil {
-		return "", fmt.Errorf("місто отримувача: %w", err)
+		return "", "", fmt.Errorf("місто отримувача: %w", err)
 	}
 	recipientWarehouse, err := c.FindWarehouse(ctx, recipientCity.Ref, req.RecipientWarehouseNo)
 	if err != nil {
-		return "", fmt.Errorf("відділення отримувача: %w", err)
+		return "", "", fmt.Errorf("відділення отримувача: %w", err)
 	}
 
 	recipientPhone := normalizePhone(req.RecipientPhone)
 	recipientRef, err := c.ensureRecipient(ctx, req.RecipientFullName, recipientPhone)
 	if err != nil {
-		return "", fmt.Errorf("отримувач: %w", err)
+		return "", "", fmt.Errorf("отримувач: %w", err)
 	}
 	recipientContact, err := c.firstContactPerson(ctx, recipientRef)
 	if err != nil {
-		return "", fmt.Errorf("контакт отримувача: %w", err)
+		return "", "", fmt.Errorf("контакт отримувача: %w", err)
 	}
 
 	description := req.Description
@@ -163,14 +164,23 @@ func (c *Client) CreateWaybill(ctx context.Context, req WaybillRequest) (string,
 
 	var docs []struct {
 		IntDocNumber string `json:"IntDocNumber"`
+		Ref          string `json:"Ref"`
 	}
 	if err := c.call(ctx, "InternetDocument", "save", props, &docs); err != nil {
-		return "", fmt.Errorf("створення ТТН: %w", err)
+		return "", "", fmt.Errorf("створення ТТН: %w", err)
 	}
 	if len(docs) == 0 || docs[0].IntDocNumber == "" {
-		return "", fmt.Errorf("np: порожня відповідь при створенні ТТН")
+		return "", "", fmt.Errorf("np: порожня відповідь при створенні ТТН")
 	}
-	return docs[0].IntDocNumber, nil
+	return docs[0].IntDocNumber, docs[0].Ref, nil
+}
+
+// DeleteWaybill скасовує ТТН за її внутрішнім Ref (не номером) — працює, доки
+// посилку фізично не занесли на відділення.
+func (c *Client) DeleteWaybill(ctx context.Context, docRef string) error {
+	return c.call(ctx, "InternetDocument", "delete", map[string]any{
+		"Documents": []string{docRef},
+	}, nil)
 }
 
 // splitFullName розбирає "Прізвище Ім'я Побатькові" на складові.

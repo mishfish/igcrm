@@ -49,6 +49,24 @@ func (h *Handler) CreateTTN(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"ttn": ttn})
 }
 
+// DeleteTTN обробляє DELETE /orders/{id}/ttn — скасовує ТТН, поки її не занесли на відділення.
+func (h *Handler) DeleteTTN(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "невірний id замовлення")
+		return
+	}
+
+	if err := h.Service.DeleteTTN(r.Context(), id); err != nil {
+		h.Log.Error("delete ttn failed", "order_id", id, "err", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"deleted": true})
+}
+
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
