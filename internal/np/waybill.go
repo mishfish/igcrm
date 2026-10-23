@@ -179,7 +179,7 @@ func (c *Client) CreateWaybill(ctx context.Context, req WaybillRequest) (ttn, do
 // посилку фізично не занесли на відділення.
 func (c *Client) DeleteWaybill(ctx context.Context, docRef string) error {
 	return c.call(ctx, "InternetDocument", "delete", map[string]any{
-		"Documents": []string{docRef},
+		"DocumentRefs": []string{docRef},
 	}, nil)
 }
 

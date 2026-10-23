@@ -162,9 +162,9 @@ func TestDeleteWaybill_Success(t *testing.T) {
 	if err := c.DeleteWaybill(context.Background(), "doc-ref-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	docs, ok := sentProps["Documents"].([]any)
+	docs, ok := sentProps["DocumentRefs"].([]any)
 	if !ok || len(docs) != 1 || docs[0] != "doc-ref-1" {
-		t.Fatalf("expected Documents=[doc-ref-1], got %v", sentProps["Documents"])
+		t.Fatalf("expected DocumentRefs=[doc-ref-1], got %v", sentProps["DocumentRefs"])
 	}
 }
 
