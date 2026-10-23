@@ -8,9 +8,10 @@ import (
 )
 
 // npServer симулює послідовність методів НП для повного створення ТТН:
-// Counterparty/getCounterparties (Sender), ContactPerson/getCounterpartyContactPersons (sender),
+// Counterparty/getCounterparties (Sender), Counterparty/getCounterpartyContactPersons (sender),
 // Address/getCities, Address/getWarehouses, Counterparty/save (Recipient),
-// ContactPerson/getCounterpartyContactPersons (recipient), InternetDocument/save.
+// Counterparty/getCounterpartyContactPersons (recipient), InternetDocument/save.
+// Назви моделей/полів тут звірені з реальним API (не лише задокументовані) — див. коміт.
 func npServer(t *testing.T, onInternetDocumentSave func(props map[string]any)) http.HandlerFunc {
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -21,15 +22,18 @@ func npServer(t *testing.T, onInternetDocumentSave func(props map[string]any)) h
 				{"Ref": "sender-cp-ref"},
 			}})
 		case "getCounterpartyContactPersons":
+			if req.ModelName != "Counterparty" {
+				t.Fatalf("getCounterpartyContactPersons must be called on model Counterparty, got %q", req.ModelName)
+			}
 			ref, _ := req.MethodProperties["Ref"].(string)
 			if ref == "sender-cp-ref" {
 				writeJSON(t, w, map[string]any{"success": true, "data": []map[string]string{
-					{"Ref": "sender-contact-ref", "Phone": "380501112233"},
+					{"Ref": "sender-contact-ref", "Phones": "380501112233"},
 				}})
 				return
 			}
 			writeJSON(t, w, map[string]any{"success": true, "data": []map[string]string{
-				{"Ref": "recipient-contact-ref", "Phone": "380671234567"},
+				{"Ref": "recipient-contact-ref", "Phones": "380671234567"},
 			}})
 		case "getCities":
 			name, _ := req.MethodProperties["FindByString"].(string)

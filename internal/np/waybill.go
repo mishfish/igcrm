@@ -28,8 +28,8 @@ type WaybillRequest struct {
 }
 
 type contactPerson struct {
-	Ref   string `json:"Ref"`
-	Phone string `json:"Phone"`
+	Ref    string `json:"Ref"`
+	Phones string `json:"Phones"`
 }
 
 // resolveSender знаходить контрагента-відправника (прив'язаного до API-ключа) і його контактну особу.
@@ -51,12 +51,12 @@ func (c *Client) resolveSender(ctx context.Context) (ref, contactRef, phone stri
 	if err != nil {
 		return "", "", "", err
 	}
-	return ref, contact.Ref, contact.Phone, nil
+	return ref, contact.Ref, contact.Phones, nil
 }
 
 func (c *Client) firstContactPerson(ctx context.Context, counterpartyRef string) (contactPerson, error) {
 	var contacts []contactPerson
-	if err := c.call(ctx, "ContactPerson", "getCounterpartyContactPersons", map[string]any{
+	if err := c.call(ctx, "Counterparty", "getCounterpartyContactPersons", map[string]any{
 		"Ref": counterpartyRef,
 	}, &contacts); err != nil {
 		return contactPerson{}, err
