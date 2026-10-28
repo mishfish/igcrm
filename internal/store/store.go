@@ -481,3 +481,58 @@ func (s *Store) SaveToken(ctx context.Context, token string, expiresAt time.Time
 		WHERE id = 1`, token, expiresAt)
 	return err
 }
+
+// ---------- telegram bot ----------
+
+type BotUser struct {
+	TGUserID, ChatID int64
+}
+
+// RegisterBotUser зберігає або оновлює користувача бота (chat_id може змінитися).
+func (s *Store) RegisterBotUser(ctx context.Context, tgUserID, chatID int64, username string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO tg_users (tg_user_id, chat_id, username) VALUES ($1, $2, $3)
+		ON CONFLICT (tg_user_id) DO UPDATE SET chat_id = EXCLUDED.chat_id, username = EXCLUDED.username`,
+		tgUserID, chatID, username)
+	return err
+}
+
+// BotUsers повертає всіх зареєстрованих користувачів бота.
+func (s *Store) BotUsers(ctx context.Context) ([]BotUser, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT tg_user_id, chat_id FROM tg_users ORDER BY registered_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BotUser
+	for rows.Next() {
+		var u BotUser
+		if err := rows.Scan(&u.TGUserID, &u.ChatID); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// BotUpdateOffset повертає останній оброблений update_id Telegram.
+func (s *Store) BotUpdateOffset(ctx context.Context) (int64, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT last_update_id FROM tg_bot_state WHERE id = 1`).Scan(&id)
+	return id, err
+}
+
+// SetBotUpdateOffset зберігає останній оброблений update_id Telegram.
+func (s *Store) SetBotUpdateOffset(ctx context.Context, updateID int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE tg_bot_state SET last_update_id = $1 WHERE id = 1`, updateID)
+	return err
+}
+
+// LogBotAction записує дію користувача бота в аудит-лог.
+func (s *Store) LogBotAction(ctx context.Context, tgUserID int64, action string, contactID, orderID *int64, detail json.RawMessage) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO bot_actions (tg_user_id, action, contact_id, order_id, detail)
+		VALUES ($1, $2, $3, $4, $5)`,
+		tgUserID, action, contactID, orderID, nullJSON(detail))
+	return err
+}

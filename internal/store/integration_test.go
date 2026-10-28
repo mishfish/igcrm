@@ -303,3 +303,47 @@ func TestOrderForShippingAndSetTTN(t *testing.T) {
 		t.Fatal("expected error when order has no ttn to clear")
 	}
 }
+
+func TestBotUsersOffsetAndAuditLog(t *testing.T) {
+	ctx := context.Background()
+	st, db := openTest(t)
+
+	if err := st.RegisterBotUser(ctx, 111, 9001, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RegisterBotUser(ctx, 222, 9002, "staff"); err != nil {
+		t.Fatal(err)
+	}
+	// re-registering (e.g. reinstalled Telegram → new chat_id) updates, not duplicates
+	if err := st.RegisterBotUser(ctx, 111, 9999, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	users, err := st.BotUsers(ctx)
+	if err != nil || len(users) != 2 {
+		t.Fatalf("users: %v %v", users, err)
+	}
+
+	off, err := st.BotUpdateOffset(ctx)
+	if err != nil || off != 0 {
+		t.Fatalf("initial offset: %v %v", off, err)
+	}
+	if err := st.SetBotUpdateOffset(ctx, 42); err != nil {
+		t.Fatal(err)
+	}
+	off, _ = st.BotUpdateOffset(ctx)
+	if off != 42 {
+		t.Fatalf("offset = %d, want 42", off)
+	}
+
+	if err := st.LogBotAction(ctx, 111, "confirm_review", intPtr(5), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var action string
+	var contactID int64
+	db.QueryRow(`SELECT action, contact_id FROM bot_actions WHERE tg_user_id = 111`).Scan(&action, &contactID)
+	if action != "confirm_review" || contactID != 5 {
+		t.Errorf("logged action: %q contact=%d", action, contactID)
+	}
+}
+
+func intPtr(v int64) *int64 { return &v }
