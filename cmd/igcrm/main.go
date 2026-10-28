@@ -19,6 +19,7 @@ import (
 	"igcrm/internal/np"
 	"igcrm/internal/shipping"
 	"igcrm/internal/store"
+	"igcrm/internal/tgbot"
 )
 
 func main() {
@@ -117,6 +118,24 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, igc *ig.Clie
 		log.Info("nova poshta ttn enabled", "sender_city", cfg.NPSenderCity, "sender_warehouse", cfg.NPSenderWarehouseNo)
 	} else {
 		log.Warn("nova poshta ttn disabled: задай NP_API_KEY")
+	}
+
+	if cfg.TGBotToken != "" && cfg.TGAllowedUserIDs != "" {
+		allowed, err := tgbot.ParseAllowlist(cfg.TGAllowedUserIDs)
+		if err != nil {
+			return fmt.Errorf("TG_ALLOWED_USER_IDS: %w", err)
+		}
+		tgClient := &tgbot.Client{BotToken: cfg.TGBotToken}
+		var shipper tgbot.Shipper
+		if cfg.NPAPIKey != "" {
+			shipper = &shipping.Service{Store: st, NP: &np.Client{APIKey: cfg.NPAPIKey}, SenderCity: cfg.NPSenderCity, SenderWarehouseNo: cfg.NPSenderWarehouseNo}
+		}
+		bot := &tgbot.Bot{Store: st, Shipping: shipper, Client: tgClient, Allowed: allowed, RateLimit: tgbot.NewRateLimiter(30, time.Minute), Pending: tgbot.NewPendingStore(5 * time.Minute), DirectusURL: cfg.DirectusPublicURL, Log: log}
+		go bot.Run(ctx)
+		go (&tgbot.PushWorker{Store: st, Client: tgClient, DirectusURL: cfg.DirectusPublicURL, Log: log}).Run(ctx)
+		log.Info("telegram bot enabled", "allowed_users", len(allowed))
+	} else {
+		log.Warn("telegram bot disabled: задай TG_BOT_TOKEN і TG_ALLOWED_USER_IDS")
 	}
 
 	srv := &http.Server{

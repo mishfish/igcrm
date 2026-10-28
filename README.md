@@ -141,6 +141,24 @@ The service's tables show up in Settings → Data Model as untracked — click e
 
 After this, a customer card = fields + list of orders + conversation, all on one page.
 
+## Telegram bot: interactive control (optional)
+
+Same `TG_BOT_TOKEN` as the alerts above (create via @BotFather if you haven't), plus:
+
+1. Get your own numeric Telegram user id — message `@userinfobot` and it replies with it
+   (this is your user id, not a chat id, and not the bot's token).
+2. Set `TG_ALLOWED_USER_IDS` in `.env` to that id (comma-separated if more than one person
+   should use the bot), optionally `DIRECTUS_PUBLIC_URL` (e.g. `https://crm.example.com`) so
+   review/order cards get an "Відкрити в Directus" button, then restart (`docker compose up -d`).
+3. Message your bot `/start` once — this registers your chat so push notifications (new items
+   needing review, new shipments) reach you automatically, not just replies to commands.
+4. `/review` lists contacts with `needs_review = true` as cards with a "✅ Підтвердити" button;
+   `/orders` lists orders awaiting shipment with "📦 Створити ТТН" (prompts for a weight, then
+   creates a real Nova Poshta TTN) and status-change buttons.
+
+Security model: a message or button press from any Telegram user not in `TG_ALLOWED_USER_IDS`
+is silently ignored (no reply at all), and every action the bot takes is logged in `bot_actions`.
+
 ## Maintenance
 
 - **Backups**: `scripts/backup.sh` in cron (the line is inside the file) + an offsite copy

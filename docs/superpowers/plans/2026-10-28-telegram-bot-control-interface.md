@@ -770,7 +770,7 @@ func TestHandleUpdate_StartRegistersAllowedUser(t *testing.T) {
 
 func TestRun_AdvancesOffsetOnlyAfterProcessing(t *testing.T) {
 	// fakeClient.GetUpdates returns one batch with update_id=5, then blocks until ctx is cancelled.
-	// Assert SetBotUpdateOffset(ctx, 6) was called exactly once, and only after the update was dispatched.
+	// Assert SetBotUpdateOffset(ctx, 5) was called exactly once, and only after the update was dispatched.
 }
 
 func TestHandleUpdate_OverRateLimitIsIgnoredLikeUnauthorized(t *testing.T) {

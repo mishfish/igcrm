@@ -31,6 +31,10 @@ type Config struct {
 	TGBotToken string
 	TGChatID   string
 
+	// Telegram-бот: інтерактивне керування (опційно — без TG_ALLOWED_USER_IDS бот вимкнений)
+	TGAllowedUserIDs  string // CSV, парситься tgbot.ParseAllowlist
+	DirectusPublicURL string // для кнопки "Відкрити в Directus"; без неї кнопка просто не додається
+
 	// Нова Пошта: створення ТТН (опційно — без ключа кнопка в Directus повертає помилку)
 	NPAPIKey            string
 	NPSenderCity        string
@@ -55,6 +59,8 @@ func Load() (Config, error) {
 		ExtractHistory:      intEnv("EXTRACT_HISTORY", 30),
 		TGBotToken:          os.Getenv("TG_BOT_TOKEN"),
 		TGChatID:            os.Getenv("TG_CHAT_ID"),
+		TGAllowedUserIDs:    os.Getenv("TG_ALLOWED_USER_IDS"),
+		DirectusPublicURL:   strings.TrimRight(os.Getenv("DIRECTUS_PUBLIC_URL"), "/"),
 		NPAPIKey:            os.Getenv("NP_API_KEY"),
 		NPSenderCity:        env("NP_SENDER_CITY", "Одеса"),
 		NPSenderWarehouseNo: env("NP_SENDER_WAREHOUSE_NO", "143"),
