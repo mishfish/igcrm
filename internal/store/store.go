@@ -614,3 +614,80 @@ func (s *Store) LogBotAction(ctx context.Context, tgUserID int64, action string,
 		tgUserID, action, contactID, orderID, nullJSON(detail))
 	return err
 }
+
+// ---------- замовлення для бота ----------
+
+// botManualStatuses — статуси, які бот може виставити вручну. "shipped" сюди не входить:
+// його ставить SetOrderTTN разом зі створенням ТТН.
+var botManualStatuses = map[string]bool{"paid": true, "delivered": true, "returned": true, "cancelled": true}
+
+// BotOrder — замовлення у вигляді, потрібному для відповідей бота.
+type BotOrder struct {
+	ID                              int64
+	Status, Items                   string
+	Amount                          *float64
+	FullName, Phone, City, NPBranch string
+	TTN                             *string
+}
+
+// BotOrder читає замовлення для показу в боті.
+func (s *Store) BotOrder(ctx context.Context, id int64) (BotOrder, error) {
+	var o BotOrder
+	var items, fullName, phone, city, npBranch, ttn sql.NullString
+	var amount sql.NullFloat64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, status, items, amount, full_name, phone, city, np_branch, ttn
+		FROM orders WHERE id = $1`, id).
+		Scan(&o.ID, &o.Status, &items, &amount, &fullName, &phone, &city, &npBranch, &ttn)
+	if errors.Is(err, sql.ErrNoRows) {
+		return o, fmt.Errorf("order %d not found", id)
+	}
+	if err != nil {
+		return o, err
+	}
+	o.Items, o.FullName, o.Phone, o.City, o.NPBranch = items.String, fullName.String, phone.String, city.String, npBranch.String
+	if amount.Valid {
+		o.Amount = &amount.Float64
+	}
+	if ttn.Valid && ttn.String != "" {
+		o.TTN = &ttn.String
+	}
+	return o, nil
+}
+
+// OrdersPendingShipment повертає замовлення без ТТН, які очікують відправки (нові або очікують оплати).
+func (s *Store) OrdersPendingShipment(ctx context.Context, limit int) ([]int64, error) {
+	return s.queryIDs(ctx, `
+		SELECT id FROM orders
+		WHERE status IN ('new', 'awaiting_payment') AND ttn IS NULL
+		ORDER BY created_at LIMIT $1`, limit)
+}
+
+// OrdersPendingTTNPush повертає замовлення з черги відправки, про які бот ще не повідомив.
+func (s *Store) OrdersPendingTTNPush(ctx context.Context, limit int) ([]int64, error) {
+	return s.queryIDs(ctx, `
+		SELECT id FROM orders
+		WHERE status IN ('new', 'awaiting_payment') AND ttn IS NULL AND bot_ttn_pushed_at IS NULL
+		ORDER BY created_at LIMIT $1`, limit)
+}
+
+// MarkTTNPushed фіксує, що бот повідомив про замовлення з черги відправки.
+func (s *Store) MarkTTNPushed(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE orders SET bot_ttn_pushed_at = now() WHERE id = $1`, id)
+	return err
+}
+
+// SetOrderStatus виставляє статус замовлення, якщо бот має право його змінювати вручну.
+func (s *Store) SetOrderStatus(ctx context.Context, id int64, status string) error {
+	if !botManualStatuses[status] {
+		return fmt.Errorf("status %q cannot be set manually", status)
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE orders SET status = $2, updated_at = now() WHERE id = $1`, id, status)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("order %d not found", id)
+	}
+	return nil
+}

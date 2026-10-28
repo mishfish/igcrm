@@ -411,4 +411,54 @@ func TestReviewQueueAndPush(t *testing.T) {
 	_ = db
 }
 
+func TestOrderQueueAndStatus(t *testing.T) {
+	ctx := context.Background()
+	st, db := openTest(t)
+
+	var contactID int64
+	db.QueryRow(`INSERT INTO contacts (igsid, full_name, phone, city, np_branch) VALUES
+		('bo1', 'Коваль Ірина', '+380671112233', 'Одеса', 'Відділення №1') RETURNING id`).Scan(&contactID)
+	var orderID int64
+	db.QueryRow(`INSERT INTO orders (contact_id, items, amount) VALUES ($1, 'сукня', 600) RETURNING id`, contactID).Scan(&orderID)
+
+	pending, err := st.OrdersPendingShipment(ctx, 10)
+	if err != nil || len(pending) != 1 || pending[0] != orderID {
+		t.Fatalf("pending shipment: %v %v", pending, err)
+	}
+	pushPending, _ := st.OrdersPendingTTNPush(ctx, 10)
+	if len(pushPending) != 1 {
+		t.Fatalf("pending ttn push: %v", pushPending)
+	}
+	if err := st.MarkTTNPushed(ctx, orderID); err != nil {
+		t.Fatal(err)
+	}
+	pushPending, _ = st.OrdersPendingTTNPush(ctx, 10)
+	if len(pushPending) != 0 {
+		t.Errorf("still pending ttn push after mark: %v", pushPending)
+	}
+	pending, _ = st.OrdersPendingShipment(ctx, 10)
+	if len(pending) != 1 {
+		t.Errorf("marking ttn push must not remove from shipment queue: %v", pending)
+	}
+
+	bo, err := st.BotOrder(ctx, orderID)
+	if err != nil || bo.Items != "сукня" || bo.FullName != "Коваль Ірина" || bo.Status != "new" {
+		t.Fatalf("bot order: %+v %v", bo, err)
+	}
+
+	if err := st.SetOrderStatus(ctx, orderID, "paid"); err != nil {
+		t.Fatal(err)
+	}
+	bo, _ = st.BotOrder(ctx, orderID)
+	if bo.Status != "paid" {
+		t.Errorf("status = %q, want paid", bo.Status)
+	}
+	if err := st.SetOrderStatus(ctx, orderID, "shipped"); err == nil {
+		t.Fatal("expected error: shipped must not be settable manually")
+	}
+	if err := st.SetOrderStatus(ctx, orderID, "bogus"); err == nil {
+		t.Fatal("expected error for unknown status")
+	}
+}
+
 func intPtr(v int64) *int64 { return &v }
