@@ -335,6 +335,10 @@ func TestBotUsersOffsetAndAuditLog(t *testing.T) {
 		t.Fatalf("offset = %d, want 42", off)
 	}
 
+	// bot_actions.contact_id is a real FK → the contact must exist first
+	if _, err := db.ExecContext(ctx, `INSERT INTO contacts (id, igsid) VALUES (5, 'bot-test')`); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.LogBotAction(ctx, 111, "confirm_review", intPtr(5), nil, nil); err != nil {
 		t.Fatal(err)
 	}
