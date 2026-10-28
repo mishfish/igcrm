@@ -677,10 +677,19 @@ type Shipper interface {
 	DeleteTTN(ctx context.Context, orderID int64) error
 }
 
+// telegramClient — exactly *Client's method set (Task 4). Bot depends on this interface,
+// not the concrete *Client, so tests can substitute a fakeClient with no network/HTTP involved.
+type telegramClient interface {
+	GetUpdates(ctx context.Context, offset int64, timeoutSec int) ([]Update, error)
+	SendMessage(ctx context.Context, chatID int64, text string, kb *InlineKeyboardMarkup) (messageID int64, err error)
+	EditMessageText(ctx context.Context, chatID, messageID int64, text string, kb *InlineKeyboardMarkup) error
+	AnswerCallbackQuery(ctx context.Context, callbackID, text string) error
+}
+
 type Bot struct {
 	Store       Store
 	Shipping    Shipper // nil → bot replies "ТТН не налаштована на сервері" for ttn actions
-	Client      *Client
+	Client      telegramClient // production: a *Client (Task 4); tests: a fakeClient
 	Allowed     Allowlist
 	RateLimit   *RateLimiter // nil → no limiting (tests may leave it unset)
 	Pending     *PendingStore
@@ -718,13 +727,27 @@ type fakeStore struct {
 // returning zero values / nil error unless a field like confirmErr/setStatusErr says otherwise.
 
 type fakeClient struct {
-	sent   []struct{ chatID int64; text string; kb *InlineKeyboardMarkup }
-	edited []struct{ chatID, messageID int64; text string }
+	nextMessageID int64
+	sent     []struct{ chatID int64; text string; kb *InlineKeyboardMarkup }
+	edited   []struct{ chatID, messageID int64; text string; kb *InlineKeyboardMarkup }
 	answered []struct{ id, text string }
+	updates  [][]Update // one slice per call to GetUpdates; empty/exhausted → blocks until ctx.Done()
 }
-func (c *fakeClient) send(chatID int64, text string, kb *InlineKeyboardMarkup) (int64, error) { ... }
-// bot.go's Bot must call through an interface wrapping *Client so fakeClient can substitute it in tests —
-// see Step 3.
+func (c *fakeClient) GetUpdates(ctx context.Context, offset int64, timeoutSec int) ([]Update, error) { ... }
+func (c *fakeClient) SendMessage(ctx context.Context, chatID int64, text string, kb *InlineKeyboardMarkup) (int64, error) {
+	c.nextMessageID++
+	c.sent = append(c.sent, struct{ chatID int64; text string; kb *InlineKeyboardMarkup }{chatID, text, kb})
+	return c.nextMessageID, nil
+}
+func (c *fakeClient) EditMessageText(ctx context.Context, chatID, messageID int64, text string, kb *InlineKeyboardMarkup) error { ... }
+func (c *fakeClient) AnswerCallbackQuery(ctx context.Context, callbackID, text string) error { ... }
+// fakeClient satisfies the telegramClient interface bot.go defines in Step 3 — no network calls in any
+// tgbot unit test. The `...` bodies above are the implementer's to fill in the same mechanical way.
+
+// discardLog is the one place this helper is defined — every later task's tests (8–12) call
+// discardLog() from this file by same-package visibility; do NOT redefine it in another _test.go
+// file in this package (Go will fail to compile on the duplicate declaration).
+func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func TestHandleUpdate_UnauthorizedIsIgnored(t *testing.T) {
 	st := &fakeStore{}
@@ -770,7 +793,7 @@ Expected: FAIL — `Bot` doesn't exist.
 
 - [ ] **Step 3: Implement `internal/tgbot/bot.go`**
 
-Define a small `telegramClient` interface (`GetUpdates`/`SendMessage`/`EditMessageText`/`AnswerCallbackQuery`, matching `*Client`'s methods exactly) so `Bot.Client` can be that interface type in tests while `*Client` satisfies it in production — avoids network calls in unit tests without needing `httptest` everywhere. `Run`: load `offset, _ := b.Store.BotUpdateOffset(ctx)`; loop `for { updates, err := b.Client.GetUpdates(ctx, offset+1, 25); ... for _, u := range updates { b.handleUpdate(ctx, u); offset = u.UpdateID }; b.Store.SetBotUpdateOffset(ctx, offset) }`, returning when `ctx.Err() != nil`. `handleUpdate` extracts the sender's user id (`u.Message.From.ID` or `u.CallbackQuery.From.ID`), returns immediately if `!b.Allowed.Allowed(id)` or if `b.RateLimit != nil && !b.RateLimit.Allow(id)` (both are silent no-ops, same as spec's "тиша" for unauthorized users), else dispatches to `handleMessage`/`handleCallback`. `handleMessage`: if `m.Text == "/start"`, call `b.Store.RegisterBotUser` and reply with a short usage message via `b.Client.SendMessage`; a command switch stub for `/review`/`/orders` is added here but implemented in Task 8. `handleCallback` is a stub switch on `strings.SplitN(cq.Data, ":", 2)[0]`, filled in by Tasks 9–11; always call `b.Client.AnswerCallbackQuery` at the end of whichever branch runs (Telegram requires this to stop the client's loading spinner).
+Add the `telegramClient` interface shown in this task's Interfaces block to `bot.go`; `*Client` (Task 4) already satisfies it, so production code passes a real `*Client` and tests pass a `fakeClient` — no network calls in any `tgbot` unit test. `Run`: load `offset, _ := b.Store.BotUpdateOffset(ctx)`; loop `for { updates, err := b.Client.GetUpdates(ctx, offset+1, 25); ... for _, u := range updates { b.handleUpdate(ctx, u); offset = u.UpdateID }; b.Store.SetBotUpdateOffset(ctx, offset) }`, returning when `ctx.Err() != nil`. `handleUpdate` extracts the sender's user id (`u.Message.From.ID` or `u.CallbackQuery.From.ID`), returns immediately if `!b.Allowed.Allowed(id)` or if `b.RateLimit != nil && !b.RateLimit.Allow(id)` (both are silent no-ops, same as spec's "тиша" for unauthorized users), else dispatches to `handleMessage`/`handleCallback`. `handleMessage`: if `m.Text == "/start"`, call `b.Store.RegisterBotUser` and reply with a short usage message via `b.Client.SendMessage`; a command switch stub for `/review`/`/orders` is added here but implemented in Task 8. `handleCallback` is a stub switch on `strings.SplitN(cq.Data, ":", 2)[0]`, filled in by Tasks 9–11; always call `b.Client.AnswerCallbackQuery` at the end of whichever branch runs (Telegram requires this to stop the client's loading spinner).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -962,6 +985,16 @@ func (f *fakeShipper) DeleteTTN(ctx context.Context, orderID int64) error {
 	return f.deleteErr
 }
 
+// mustGet is a local test helper for this file only (actions_ttn_test.go) — fetches a pending
+// action or fails the test immediately; every test below sets the pending action itself first.
+func mustGet(t *testing.T, p *PendingStore, userID int64) PendingAction {
+	a, ok := p.Get(userID)
+	if !ok {
+		t.Fatalf("expected a pending action for user %d", userID)
+	}
+	return a
+}
+
 func TestCreateTTN_HappyPath(t *testing.T) {
 	sh := &fakeShipper{createTTN: "20450000000001"}
 	b := &Bot{Store: &fakeStore{}, Shipping: sh, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
@@ -1148,11 +1181,12 @@ git commit -m "feat(tgbot): manual order status change action"
 
 **Files:**
 - Create: `internal/tgbot/push.go`
+- Modify: `internal/tgbot/bot_test.go` (Task 7's `fakeStore` already has stub bodies for `ContactsPendingReviewPush`/`OrdersPendingTTNPush`/`MarkReviewPushed`/`MarkTTNPushed` returning zero values, to satisfy the `Store` interface at compile time; add the fields the next step lists and rewrite those four method bodies to use them — same type, same file, no new type)
 - Test: `internal/tgbot/push_test.go`
 
 **Interfaces:**
-- Consumes: `Store` (Task 7), `telegramClient`-shaped send capability, `RenderContactCard`/`ReviewKeyboard`/`RenderOrderSummary`/`OrderActionsKeyboard` (Task 6).
-- Produces: `type PushWorker struct { Store Store; Client telegramSender; DirectusURL string; Interval time.Duration; Log *slog.Logger }` with `func (w *PushWorker) Run(ctx context.Context)` and `func (w *PushWorker) Tick(ctx context.Context)` (same `Run`-calls-`Tick`-on-a-ticker shape as `extract.Worker.Run`/`Tick`, `internal/extract/extract.go:195`).
+- Consumes: `Store` and the `telegramClient` interface (both from Task 7 — `PushWorker` only ever calls `SendMessage` on it, but reuses the same interface and the same `fakeClient` from `bot_test.go` rather than declaring a narrower one), `RenderContactCard`/`ReviewKeyboard`/`RenderOrderSummary`/`OrderActionsKeyboard` (Task 6).
+- Produces: `type PushWorker struct { Store Store; Client telegramClient; DirectusURL string; Interval time.Duration; Log *slog.Logger }` with `func (w *PushWorker) Run(ctx context.Context)` and `func (w *PushWorker) Tick(ctx context.Context)` (same `Run`-calls-`Tick`-on-a-ticker shape as `extract.Worker.Run`/`Tick`, `internal/extract/extract.go:195`).
 
 - [ ] **Step 1: Write the failing tests**
 
