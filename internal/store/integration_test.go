@@ -350,4 +350,65 @@ func TestBotUsersOffsetAndAuditLog(t *testing.T) {
 	}
 }
 
+func TestReviewQueueAndPush(t *testing.T) {
+	ctx := context.Background()
+	st, db := openTest(t)
+	now := time.Now().UTC()
+
+	st.SaveMessage(ctx, store.Message{MID: "r1", IGSID: "321", Direction: "in", Text: "Оленко, 0671234567, Київ, 45", SentAt: now}, 0)
+	ids, _ := st.ClaimDue(ctx, 10)
+	id := ids[0]
+	w := &extract.Worker{Store: st, Model: "fake", History: 30, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		LLM: fakeLLM{`{"full_name":"Оленко","phone":"0671234567","city":"Київ","np_branch":"45"}`}}
+	if err := w.Process(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+
+	needing, err := st.ContactsNeedingReview(ctx, 10)
+	if err != nil || len(needing) != 1 || needing[0] != id {
+		t.Fatalf("needing review: %v %v", needing, err)
+	}
+	pending, _ := st.ContactsPendingReviewPush(ctx, 10)
+	if len(pending) != 1 || pending[0] != id {
+		t.Fatalf("pending push: %v", pending)
+	}
+
+	ext, err := st.LastExtraction(ctx, id)
+	if err != nil || ext.Changes["full_name"].New != "Оленко" {
+		t.Fatalf("last extraction: %+v %v", ext, err)
+	}
+
+	if err := st.MarkReviewPushed(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ = st.ContactsPendingReviewPush(ctx, 10)
+	if len(pending) != 0 {
+		t.Errorf("still pending push after mark: %v", pending)
+	}
+	needing, _ = st.ContactsNeedingReview(ctx, 10)
+	if len(needing) != 1 {
+		t.Errorf("marking push must not confirm review: %v", needing)
+	}
+
+	// a new round of real changes re-opens the push queue
+	w.LLM = fakeLLM{`{"city":"Львів"}`}
+	w.Process(ctx, id)
+	pending, _ = st.ContactsPendingReviewPush(ctx, 10)
+	if len(pending) != 1 {
+		t.Errorf("new changes must reset bot_review_pushed_at: %v", pending)
+	}
+
+	if err := st.ConfirmReview(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	needing, _ = st.ContactsNeedingReview(ctx, 10)
+	if len(needing) != 0 {
+		t.Errorf("confirmed contact still needing review: %v", needing)
+	}
+	if err := st.ConfirmReview(ctx, id); err == nil {
+		t.Fatal("expected error confirming an already-confirmed contact")
+	}
+	_ = db
+}
+
 func intPtr(v int64) *int64 { return &v }

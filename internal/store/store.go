@@ -291,7 +291,7 @@ func (s *Store) ApplyExtraction(ctx context.Context, id int64, model string, res
 			args = append(args, ch.New)
 			sets = append(sets, fmt.Sprintf("%s = $%d", f, len(args)))
 		}
-		q := `UPDATE contacts SET ` + strings.Join(sets, ", ") + `, needs_review = true WHERE id = $1 AND auto_update`
+		q := `UPDATE contacts SET ` + strings.Join(sets, ", ") + `, needs_review = true, bot_review_pushed_at = NULL WHERE id = $1 AND auto_update`
 		res, err := tx.ExecContext(ctx, q, args...)
 		if err != nil {
 			return fmt.Errorf("update contact: %w", err)
@@ -307,6 +307,84 @@ func (s *Store) ApplyExtraction(ctx context.Context, id int64, model string, res
 		return fmt.Errorf("insert extraction: %w", err)
 	}
 	return tx.Commit()
+}
+
+// ---------- review queue ----------
+
+// Extraction — один запис журналу екстракції: яка модель і які поля змінила.
+type Extraction struct {
+	Model   string
+	Changes map[string]Change
+	At      time.Time
+}
+
+// ContactsNeedingReview повертає контакти, які LLM змінив і які ще не підтверджено.
+func (s *Store) ContactsNeedingReview(ctx context.Context, limit int) ([]int64, error) {
+	return s.queryIDs(ctx, `SELECT id FROM contacts WHERE needs_review ORDER BY id LIMIT $1`, limit)
+}
+
+// ConfirmReview знімає позначку needs_review з контакта.
+func (s *Store) ConfirmReview(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE contacts SET needs_review = false WHERE id = $1 AND needs_review`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("contact %d not found or not pending review", id)
+	}
+	return nil
+}
+
+// ContactsPendingReviewPush повертає контакти на перевірці, про які бот ще не повідомив.
+func (s *Store) ContactsPendingReviewPush(ctx context.Context, limit int) ([]int64, error) {
+	return s.queryIDs(ctx, `
+		SELECT id FROM contacts
+		WHERE needs_review AND bot_review_pushed_at IS NULL
+		ORDER BY id LIMIT $1`, limit)
+}
+
+// MarkReviewPushed фіксує, що бот повідомив про зміни контакта (не підтверджує їх).
+func (s *Store) MarkReviewPushed(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE contacts SET bot_review_pushed_at = now() WHERE id = $1`, id)
+	return err
+}
+
+// LastExtraction повертає останню екстракцію контакта; якщо їх ще немає — порожній запис без помилки.
+func (s *Store) LastExtraction(ctx context.Context, contactID int64) (Extraction, error) {
+	var e Extraction
+	var changesJSON []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(model, ''), changes, created_at FROM extractions
+		WHERE contact_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, contactID).
+		Scan(&e.Model, &changesJSON, &e.At)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Extraction{}, nil
+	}
+	if err != nil {
+		return Extraction{}, err
+	}
+	if err := json.Unmarshal(changesJSON, &e.Changes); err != nil {
+		return Extraction{}, fmt.Errorf("decode changes: %w", err)
+	}
+	return e, nil
+}
+
+// queryIDs виконує запит, що повертає один стовпець id.
+func (s *Store) queryIDs(ctx context.Context, q string, args ...any) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // ---------- orders ----------
