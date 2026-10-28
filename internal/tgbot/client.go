@@ -65,7 +65,15 @@ type InlineKeyboardMarkup struct {
 type Client struct {
 	BotToken string
 	BaseURL  string
-	HTTP     *http.Client
+	// HTTP is the client used for all requests, including GetUpdates's long
+	// poll. GetUpdates bounds its own request with a per-call context
+	// timeout (timeoutSec + 5s headroom), but that can only shorten the
+	// effective deadline, never lengthen it past this client's Timeout. If
+	// set, HTTP.Timeout must be 0 (unbounded) or exceed the longest
+	// timeoutSec+5s ever passed to GetUpdates — a shorter Client-wide
+	// Timeout would also cut off the long poll. Left nil, http.DefaultClient
+	// is used, which has Timeout == 0.
+	HTTP *http.Client
 }
 
 // apiResponse mirrors Telegram's generic response envelope.
