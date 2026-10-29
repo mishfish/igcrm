@@ -291,7 +291,7 @@ func (s *Store) ApplyExtraction(ctx context.Context, id int64, model string, res
 			args = append(args, ch.New)
 			sets = append(sets, fmt.Sprintf("%s = $%d", f, len(args)))
 		}
-		q := `UPDATE contacts SET ` + strings.Join(sets, ", ") + `, needs_review = true WHERE id = $1 AND auto_update`
+		q := `UPDATE contacts SET ` + strings.Join(sets, ", ") + `, needs_review = true, bot_review_pushed_at = NULL WHERE id = $1 AND auto_update`
 		res, err := tx.ExecContext(ctx, q, args...)
 		if err != nil {
 			return fmt.Errorf("update contact: %w", err)
@@ -307,6 +307,84 @@ func (s *Store) ApplyExtraction(ctx context.Context, id int64, model string, res
 		return fmt.Errorf("insert extraction: %w", err)
 	}
 	return tx.Commit()
+}
+
+// ---------- review queue ----------
+
+// Extraction — один запис журналу екстракції: яка модель і які поля змінила.
+type Extraction struct {
+	Model   string
+	Changes map[string]Change
+	At      time.Time
+}
+
+// ContactsNeedingReview повертає контакти, які LLM змінив і які ще не підтверджено.
+func (s *Store) ContactsNeedingReview(ctx context.Context, limit int) ([]int64, error) {
+	return s.queryIDs(ctx, `SELECT id FROM contacts WHERE needs_review ORDER BY id LIMIT $1`, limit)
+}
+
+// ConfirmReview знімає позначку needs_review з контакта.
+func (s *Store) ConfirmReview(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE contacts SET needs_review = false WHERE id = $1 AND needs_review`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("contact %d not found or not pending review", id)
+	}
+	return nil
+}
+
+// ContactsPendingReviewPush повертає контакти на перевірці, про які бот ще не повідомив.
+func (s *Store) ContactsPendingReviewPush(ctx context.Context, limit int) ([]int64, error) {
+	return s.queryIDs(ctx, `
+		SELECT id FROM contacts
+		WHERE needs_review AND bot_review_pushed_at IS NULL
+		ORDER BY id LIMIT $1`, limit)
+}
+
+// MarkReviewPushed фіксує, що бот повідомив про зміни контакта (не підтверджує їх).
+func (s *Store) MarkReviewPushed(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE contacts SET bot_review_pushed_at = now() WHERE id = $1`, id)
+	return err
+}
+
+// LastExtraction повертає останню екстракцію контакта; якщо їх ще немає — порожній запис без помилки.
+func (s *Store) LastExtraction(ctx context.Context, contactID int64) (Extraction, error) {
+	var e Extraction
+	var changesJSON []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(model, ''), changes, created_at FROM extractions
+		WHERE contact_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, contactID).
+		Scan(&e.Model, &changesJSON, &e.At)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Extraction{}, nil
+	}
+	if err != nil {
+		return Extraction{}, err
+	}
+	if err := json.Unmarshal(changesJSON, &e.Changes); err != nil {
+		return Extraction{}, fmt.Errorf("decode changes: %w", err)
+	}
+	return e, nil
+}
+
+// queryIDs виконує запит, що повертає один стовпець id.
+func (s *Store) queryIDs(ctx context.Context, q string, args ...any) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // ---------- orders ----------
@@ -480,4 +558,140 @@ func (s *Store) SaveToken(ctx context.Context, token string, expiresAt time.Time
 		UPDATE ig_token SET access_token = $1, expires_at = $2, refreshed_at = now(), updated_at = now()
 		WHERE id = 1`, token, expiresAt)
 	return err
+}
+
+// ---------- telegram bot ----------
+
+type BotUser struct {
+	TGUserID, ChatID int64
+}
+
+// RegisterBotUser зберігає або оновлює користувача бота (chat_id може змінитися).
+func (s *Store) RegisterBotUser(ctx context.Context, tgUserID, chatID int64, username string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO tg_users (tg_user_id, chat_id, username) VALUES ($1, $2, $3)
+		ON CONFLICT (tg_user_id) DO UPDATE SET chat_id = EXCLUDED.chat_id, username = EXCLUDED.username`,
+		tgUserID, chatID, username)
+	return err
+}
+
+// BotUsers повертає всіх зареєстрованих користувачів бота.
+func (s *Store) BotUsers(ctx context.Context) ([]BotUser, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT tg_user_id, chat_id FROM tg_users ORDER BY registered_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BotUser
+	for rows.Next() {
+		var u BotUser
+		if err := rows.Scan(&u.TGUserID, &u.ChatID); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// BotUpdateOffset повертає останній оброблений update_id Telegram.
+func (s *Store) BotUpdateOffset(ctx context.Context) (int64, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT last_update_id FROM tg_bot_state WHERE id = 1`).Scan(&id)
+	return id, err
+}
+
+// SetBotUpdateOffset зберігає останній оброблений update_id Telegram.
+func (s *Store) SetBotUpdateOffset(ctx context.Context, updateID int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE tg_bot_state SET last_update_id = $1 WHERE id = 1`, updateID)
+	return err
+}
+
+// LogBotAction записує дію користувача бота в аудит-лог.
+func (s *Store) LogBotAction(ctx context.Context, tgUserID int64, action string, contactID, orderID *int64, detail json.RawMessage) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO bot_actions (tg_user_id, action, contact_id, order_id, detail)
+		VALUES ($1, $2, $3, $4, $5)`,
+		tgUserID, action, contactID, orderID, nullJSON(detail))
+	return err
+}
+
+// ---------- замовлення для бота ----------
+
+// botManualStatuses — статуси, які бот може виставити вручну. "shipped" сюди не входить:
+// його ставить SetOrderTTN разом зі створенням ТТН.
+var botManualStatuses = map[string]bool{"paid": true, "delivered": true, "returned": true, "cancelled": true}
+
+// BotOrder — замовлення у вигляді, потрібному для відповідей бота.
+type BotOrder struct {
+	ID                              int64
+	Status, Items                   string
+	Amount                          *float64
+	FullName, Phone, City, NPBranch string
+	TTN                             *string
+}
+
+// BotOrder читає замовлення для показу в боті.
+func (s *Store) BotOrder(ctx context.Context, id int64) (BotOrder, error) {
+	var o BotOrder
+	var items, fullName, phone, city, npBranch, ttn sql.NullString
+	var amount sql.NullFloat64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, status, items, amount, full_name, phone, city, np_branch, ttn
+		FROM orders WHERE id = $1`, id).
+		Scan(&o.ID, &o.Status, &items, &amount, &fullName, &phone, &city, &npBranch, &ttn)
+	if errors.Is(err, sql.ErrNoRows) {
+		return o, fmt.Errorf("order %d not found", id)
+	}
+	if err != nil {
+		return o, err
+	}
+	o.Items, o.FullName, o.Phone, o.City, o.NPBranch = items.String, fullName.String, phone.String, city.String, npBranch.String
+	if amount.Valid {
+		o.Amount = &amount.Float64
+	}
+	if ttn.Valid && ttn.String != "" {
+		o.TTN = &ttn.String
+	}
+	return o, nil
+}
+
+// shippableOrderCond — спільна умова черги відправки: замовлення без ТТН, які
+// ще не відправлені і не скасовані (нові, оплачені, у виробництві тощо).
+const shippableOrderCond = `ttn IS NULL AND status NOT IN ('shipped', 'delivered', 'returned', 'cancelled')`
+
+// OrdersPendingShipment повертає замовлення без ТТН, які ще не відправлені і не скасовані.
+func (s *Store) OrdersPendingShipment(ctx context.Context, limit int) ([]int64, error) {
+	return s.queryIDs(ctx, `
+		SELECT id FROM orders
+		WHERE `+shippableOrderCond+`
+		ORDER BY created_at LIMIT $1`, limit)
+}
+
+// OrdersPendingTTNPush повертає замовлення з черги відправки, про які бот ще не повідомив.
+func (s *Store) OrdersPendingTTNPush(ctx context.Context, limit int) ([]int64, error) {
+	return s.queryIDs(ctx, `
+		SELECT id FROM orders
+		WHERE `+shippableOrderCond+` AND bot_ttn_pushed_at IS NULL
+		ORDER BY created_at LIMIT $1`, limit)
+}
+
+// MarkTTNPushed фіксує, що бот повідомив про замовлення з черги відправки.
+func (s *Store) MarkTTNPushed(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE orders SET bot_ttn_pushed_at = now() WHERE id = $1`, id)
+	return err
+}
+
+// SetOrderStatus виставляє статус замовлення, якщо бот має право його змінювати вручну.
+func (s *Store) SetOrderStatus(ctx context.Context, id int64, status string) error {
+	if !botManualStatuses[status] {
+		return fmt.Errorf("status %q cannot be set manually", status)
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE orders SET status = $2, updated_at = now() WHERE id = $1`, id, status)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("order %d not found", id)
+	}
+	return nil
 }

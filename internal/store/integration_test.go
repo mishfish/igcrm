@@ -303,3 +303,182 @@ func TestOrderForShippingAndSetTTN(t *testing.T) {
 		t.Fatal("expected error when order has no ttn to clear")
 	}
 }
+
+func TestBotUsersOffsetAndAuditLog(t *testing.T) {
+	ctx := context.Background()
+	st, db := openTest(t)
+
+	if err := st.RegisterBotUser(ctx, 111, 9001, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RegisterBotUser(ctx, 222, 9002, "staff"); err != nil {
+		t.Fatal(err)
+	}
+	// re-registering (e.g. reinstalled Telegram → new chat_id) updates, not duplicates
+	if err := st.RegisterBotUser(ctx, 111, 9999, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	users, err := st.BotUsers(ctx)
+	if err != nil || len(users) != 2 {
+		t.Fatalf("users: %v %v", users, err)
+	}
+
+	off, err := st.BotUpdateOffset(ctx)
+	if err != nil || off != 0 {
+		t.Fatalf("initial offset: %v %v", off, err)
+	}
+	if err := st.SetBotUpdateOffset(ctx, 42); err != nil {
+		t.Fatal(err)
+	}
+	off, _ = st.BotUpdateOffset(ctx)
+	if off != 42 {
+		t.Fatalf("offset = %d, want 42", off)
+	}
+
+	// bot_actions.contact_id is a real FK → the contact must exist first
+	if _, err := db.ExecContext(ctx, `INSERT INTO contacts (id, igsid) VALUES (5, 'bot-test')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.LogBotAction(ctx, 111, "confirm_review", intPtr(5), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var action string
+	var contactID int64
+	db.QueryRow(`SELECT action, contact_id FROM bot_actions WHERE tg_user_id = 111`).Scan(&action, &contactID)
+	if action != "confirm_review" || contactID != 5 {
+		t.Errorf("logged action: %q contact=%d", action, contactID)
+	}
+}
+
+func TestReviewQueueAndPush(t *testing.T) {
+	ctx := context.Background()
+	st, db := openTest(t)
+	now := time.Now().UTC()
+
+	st.SaveMessage(ctx, store.Message{MID: "r1", IGSID: "321", Direction: "in", Text: "Оленко, 0671234567, Київ, 45", SentAt: now}, 0)
+	ids, _ := st.ClaimDue(ctx, 10)
+	id := ids[0]
+	w := &extract.Worker{Store: st, Model: "fake", History: 30, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		LLM: fakeLLM{`{"full_name":"Оленко","phone":"0671234567","city":"Київ","np_branch":"45"}`}}
+	if err := w.Process(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+
+	needing, err := st.ContactsNeedingReview(ctx, 10)
+	if err != nil || len(needing) != 1 || needing[0] != id {
+		t.Fatalf("needing review: %v %v", needing, err)
+	}
+	pending, _ := st.ContactsPendingReviewPush(ctx, 10)
+	if len(pending) != 1 || pending[0] != id {
+		t.Fatalf("pending push: %v", pending)
+	}
+
+	ext, err := st.LastExtraction(ctx, id)
+	if err != nil || ext.Changes["full_name"].New != "Оленко" {
+		t.Fatalf("last extraction: %+v %v", ext, err)
+	}
+
+	if err := st.MarkReviewPushed(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ = st.ContactsPendingReviewPush(ctx, 10)
+	if len(pending) != 0 {
+		t.Errorf("still pending push after mark: %v", pending)
+	}
+	needing, _ = st.ContactsNeedingReview(ctx, 10)
+	if len(needing) != 1 {
+		t.Errorf("marking push must not confirm review: %v", needing)
+	}
+
+	// a new round of real changes re-opens the push queue
+	w.LLM = fakeLLM{`{"city":"Львів"}`}
+	w.Process(ctx, id)
+	pending, _ = st.ContactsPendingReviewPush(ctx, 10)
+	if len(pending) != 1 {
+		t.Errorf("new changes must reset bot_review_pushed_at: %v", pending)
+	}
+
+	if err := st.ConfirmReview(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	needing, _ = st.ContactsNeedingReview(ctx, 10)
+	if len(needing) != 0 {
+		t.Errorf("confirmed contact still needing review: %v", needing)
+	}
+	if err := st.ConfirmReview(ctx, id); err == nil {
+		t.Fatal("expected error confirming an already-confirmed contact")
+	}
+	_ = db
+}
+
+func TestOrderQueueAndStatus(t *testing.T) {
+	ctx := context.Background()
+	st, db := openTest(t)
+
+	var contactID int64
+	db.QueryRow(`INSERT INTO contacts (igsid, full_name, phone, city, np_branch) VALUES
+		('bo1', 'Коваль Ірина', '+380671112233', 'Одеса', 'Відділення №1') RETURNING id`).Scan(&contactID)
+	var orderID int64
+	db.QueryRow(`INSERT INTO orders (contact_id, items, amount) VALUES ($1, 'сукня', 600) RETURNING id`, contactID).Scan(&orderID)
+
+	pending, err := st.OrdersPendingShipment(ctx, 10)
+	if err != nil || len(pending) != 1 || pending[0] != orderID {
+		t.Fatalf("pending shipment: %v %v", pending, err)
+	}
+	pushPending, _ := st.OrdersPendingTTNPush(ctx, 10)
+	if len(pushPending) != 1 {
+		t.Fatalf("pending ttn push: %v", pushPending)
+	}
+	if err := st.MarkTTNPushed(ctx, orderID); err != nil {
+		t.Fatal(err)
+	}
+	pushPending, _ = st.OrdersPendingTTNPush(ctx, 10)
+	if len(pushPending) != 0 {
+		t.Errorf("still pending ttn push after mark: %v", pushPending)
+	}
+	pending, _ = st.OrdersPendingShipment(ctx, 10)
+	if len(pending) != 1 {
+		t.Errorf("marking ttn push must not remove from shipment queue: %v", pending)
+	}
+
+	bo, err := st.BotOrder(ctx, orderID)
+	if err != nil || bo.Items != "сукня" || bo.FullName != "Коваль Ірина" || bo.Status != "new" {
+		t.Fatalf("bot order: %+v %v", bo, err)
+	}
+
+	if err := st.SetOrderStatus(ctx, orderID, "paid"); err != nil {
+		t.Fatal(err)
+	}
+	bo, _ = st.BotOrder(ctx, orderID)
+	if bo.Status != "paid" {
+		t.Errorf("status = %q, want paid", bo.Status)
+	}
+	pending, _ = st.OrdersPendingShipment(ctx, 10)
+	if len(pending) != 1 || pending[0] != orderID {
+		t.Errorf("paid order must stay in shipment queue: %v", pending)
+	}
+	if err := st.SetOrderStatus(ctx, orderID, "shipped"); err == nil {
+		t.Fatal("expected error: shipped must not be settable manually")
+	}
+	if err := st.SetOrderStatus(ctx, orderID, "bogus"); err == nil {
+		t.Fatal("expected error for unknown status")
+	}
+
+	if err := st.SetOrderStatus(ctx, orderID, "cancelled"); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ = st.OrdersPendingShipment(ctx, 10)
+	if len(pending) != 0 {
+		t.Errorf("cancelled order must leave shipment queue: %v", pending)
+	}
+
+	// An order that already has a TTN is not in the queue regardless of status.
+	var withTTN int64
+	db.QueryRow(`INSERT INTO orders (contact_id, items, amount, ttn) VALUES ($1, 'сукня', 600, '20450000000001') RETURNING id`, contactID).Scan(&withTTN)
+	pending, _ = st.OrdersPendingShipment(ctx, 10)
+	if len(pending) != 0 {
+		t.Errorf("order with ttn must not be in shipment queue: %v", pending)
+	}
+}
+
+func intPtr(v int64) *int64 { return &v }

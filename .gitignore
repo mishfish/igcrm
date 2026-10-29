@@ -3,3 +3,6 @@ backups/
 node_modules/
 dist/
 package-lock.json
+
+.superpowers/
+.idea/
