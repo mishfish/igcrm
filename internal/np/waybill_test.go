@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"testing"
@@ -206,5 +207,97 @@ func TestCreateWaybill_CachesSenderBetweenWaybills(t *testing.T) {
 	}
 	if senderLookups != 1 {
 		t.Fatalf("expected sender to be looked up once, got %d", senderLookups)
+	}
+}
+
+// recipientContactsServer — як npServer, але контактні особи отримувача віддає так, як
+// реальна НП: усі фізособи під одним контрагентом "Приватна особа", сторінками.
+func recipientContactsServer(t *testing.T, pages [][]map[string]string, onSave func(map[string]any)) http.HandlerFunc {
+	base := npServer(t, onSave)
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req apiRequest
+		_ = json.Unmarshal(body, &req)
+		if req.CalledMethod == "getCounterpartyContactPersons" && req.MethodProperties["Ref"] == "recipient-cp-ref" {
+			page := 1
+			if p, ok := req.MethodProperties["Page"].(string); ok {
+				fmt.Sscan(p, &page)
+			}
+			data := []map[string]string{}
+			if page >= 1 && page <= len(pages) {
+				data = pages[page-1]
+			}
+			writeJSON(t, w, map[string]any{"success": true, "data": data})
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		base(w, r)
+	}
+}
+
+var bogdanovaReq = WaybillRequest{
+	SenderCityName: "Одеса", SenderWarehouseNo: "143",
+	RecipientFullName: "Богданова Марина", RecipientPhone: "+380936348767",
+	RecipientCityName: "Київ", RecipientWarehouseNo: "45",
+	Weight: 2, DeclaredValue: 1500,
+}
+
+func TestCreateWaybill_PicksRecipientContactByPhoneNotFirstInList(t *testing.T) {
+	var props map[string]any
+	c := newTestClient(t, recipientContactsServer(t, [][]map[string]string{{
+		{"Ref": "cp-bogdanov", "Description": "Богданов Михайло Васильович", "Phones": "380931136688"},
+		{"Ref": "cp-bogdanova", "Description": "Богданова Марина", "Phones": "380936348767"},
+		{"Ref": "cp-other", "Description": "Дубневич Ірина", "Phones": "380501116685"},
+	}}, func(p map[string]any) { props = p }))
+
+	if _, _, err := c.CreateWaybill(context.Background(), bogdanovaReq); err != nil {
+		t.Fatal(err)
+	}
+	if props["ContactRecipient"] != "cp-bogdanova" {
+		t.Fatalf("ContactRecipient = %v, want cp-bogdanova", props["ContactRecipient"])
+	}
+}
+
+func TestCreateWaybill_FindsRecipientContactOnLaterPage(t *testing.T) {
+	var props map[string]any
+	c := newTestClient(t, recipientContactsServer(t, [][]map[string]string{
+		{{"Ref": "cp-a", "Description": "Хтось Інший", "Phones": "380500000001"}},
+		{{"Ref": "cp-bogdanova", "Description": "Богданова Марина", "Phones": "+38 093 634 87 67"}},
+	}, func(p map[string]any) { props = p }))
+
+	if _, _, err := c.CreateWaybill(context.Background(), bogdanovaReq); err != nil {
+		t.Fatal(err)
+	}
+	if props["ContactRecipient"] != "cp-bogdanova" {
+		t.Fatalf("ContactRecipient = %v, want cp-bogdanova", props["ContactRecipient"])
+	}
+}
+
+func TestCreateWaybill_SamePhoneTwoPeoplePrefersMatchingSurname(t *testing.T) {
+	var props map[string]any
+	c := newTestClient(t, recipientContactsServer(t, [][]map[string]string{{
+		{"Ref": "cp-husband", "Description": "Петренко Олег", "Phones": "380936348767"},
+		{"Ref": "cp-bogdanova", "Description": "Богданова Марина", "Phones": "380936348767"},
+	}}, func(p map[string]any) { props = p }))
+
+	if _, _, err := c.CreateWaybill(context.Background(), bogdanovaReq); err != nil {
+		t.Fatal(err)
+	}
+	if props["ContactRecipient"] != "cp-bogdanova" {
+		t.Fatalf("ContactRecipient = %v, want cp-bogdanova", props["ContactRecipient"])
+	}
+}
+
+func TestCreateWaybill_NoContactWithRecipientPhoneFailsInsteadOfUsingSomeoneElse(t *testing.T) {
+	saved := false
+	c := newTestClient(t, recipientContactsServer(t, [][]map[string]string{{
+		{"Ref": "cp-bogdanov", "Description": "Богданов Михайло Васильович", "Phones": "380931136688"},
+	}}, func(map[string]any) { saved = true }))
+
+	if _, _, err := c.CreateWaybill(context.Background(), bogdanovaReq); err == nil {
+		t.Fatal("expected an error when no contact person has the recipient's phone")
+	}
+	if saved {
+		t.Fatal("InternetDocument/save must not be called with the wrong recipient")
 	}
 }

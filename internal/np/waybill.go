@@ -28,8 +28,9 @@ type WaybillRequest struct {
 }
 
 type contactPerson struct {
-	Ref    string `json:"Ref"`
-	Phones string `json:"Phones"`
+	Ref         string `json:"Ref"`
+	Phones      string `json:"Phones"`
+	Description string `json:"Description"`
 }
 
 // resolveSender знаходить контрагента-відправника (прив'язаного до API-ключа) і його контактну особу.
@@ -106,6 +107,46 @@ func (c *Client) firstContactPerson(ctx context.Context, counterpartyRef string)
 	return contacts[0], nil
 }
 
+// recipientContactPerson знаходить серед контактних осіб отримувача ту, що має телефон
+// замовлення. Усі фізособи-отримувачі в НП живуть під одним спільним контрагентом
+// "Приватна особа", тож перша контактна особа в списку — це зазвичай зовсім інша людина.
+// Якщо на телефон кілька осіб — бере ту, чиє прізвище збігається. Не знайшли — помилка,
+// а не чужий отримувач у ТТН.
+func (c *Client) recipientContactPerson(ctx context.Context, counterpartyRef, phone, lastName string) (contactPerson, error) {
+	var matches []contactPerson
+	for page := 1; page <= 50; page++ {
+		var contacts []contactPerson
+		if err := c.call(ctx, "Counterparty", "getCounterpartyContactPersons", map[string]any{
+			"Ref":  counterpartyRef,
+			"Page": fmt.Sprint(page),
+		}, &contacts); err != nil {
+			return contactPerson{}, err
+		}
+		if len(contacts) == 0 {
+			break
+		}
+		for _, cp := range contacts {
+			if normalizePhone(cp.Phones) == phone {
+				matches = append(matches, cp)
+			}
+		}
+		if len(matches) > 0 {
+			break
+		}
+	}
+	if len(matches) == 0 {
+		return contactPerson{}, fmt.Errorf("np: контактну особу з телефоном %s не знайдено", phone)
+	}
+	if lastName != "" {
+		for _, cp := range matches {
+			if strings.Contains(strings.ToLower(cp.Description), strings.ToLower(lastName)) {
+				return cp, nil
+			}
+		}
+	}
+	return matches[0], nil
+}
+
 // ensureRecipient створює (або повертає вже наявного — НП дедублює за телефоном) отримувача-фізособу.
 func (c *Client) ensureRecipient(ctx context.Context, fullName, phone string) (string, error) {
 	first, last, middle := splitFullName(fullName)
@@ -153,7 +194,8 @@ func (c *Client) CreateWaybill(ctx context.Context, req WaybillRequest) (ttn, do
 	if err != nil {
 		return "", "", fmt.Errorf("отримувач: %w", err)
 	}
-	recipientContact, err := c.firstContactPerson(ctx, recipientRef)
+	_, recipientLastName, _ := splitFullName(req.RecipientFullName)
+	recipientContact, err := c.recipientContactPerson(ctx, recipientRef, recipientPhone, recipientLastName)
 	if err != nil {
 		return "", "", fmt.Errorf("контакт отримувача: %w", err)
 	}
