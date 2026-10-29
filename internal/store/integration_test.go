@@ -453,11 +453,31 @@ func TestOrderQueueAndStatus(t *testing.T) {
 	if bo.Status != "paid" {
 		t.Errorf("status = %q, want paid", bo.Status)
 	}
+	pending, _ = st.OrdersPendingShipment(ctx, 10)
+	if len(pending) != 1 || pending[0] != orderID {
+		t.Errorf("paid order must stay in shipment queue: %v", pending)
+	}
 	if err := st.SetOrderStatus(ctx, orderID, "shipped"); err == nil {
 		t.Fatal("expected error: shipped must not be settable manually")
 	}
 	if err := st.SetOrderStatus(ctx, orderID, "bogus"); err == nil {
 		t.Fatal("expected error for unknown status")
+	}
+
+	if err := st.SetOrderStatus(ctx, orderID, "cancelled"); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ = st.OrdersPendingShipment(ctx, 10)
+	if len(pending) != 0 {
+		t.Errorf("cancelled order must leave shipment queue: %v", pending)
+	}
+
+	// An order that already has a TTN is not in the queue regardless of status.
+	var withTTN int64
+	db.QueryRow(`INSERT INTO orders (contact_id, items, amount, ttn) VALUES ($1, 'сукня', 600, '20450000000001') RETURNING id`, contactID).Scan(&withTTN)
+	pending, _ = st.OrdersPendingShipment(ctx, 10)
+	if len(pending) != 0 {
+		t.Errorf("order with ttn must not be in shipment queue: %v", pending)
 	}
 }
 

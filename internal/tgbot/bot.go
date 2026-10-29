@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"strconv"
 	"strings"
+	"time"
 
 	"igcrm/internal/store"
 )
@@ -62,6 +62,10 @@ type Bot struct {
 	Pending     *PendingStore
 	DirectusURL string
 	Log         *slog.Logger
+
+	// retryMin/retryMax bound the GetUpdates error backoff; zero means the
+	// defaults (1s doubling up to 30s). Unexported so tests can shrink them.
+	retryMin, retryMax time.Duration
 }
 
 // startMessage is the short usage reply sent to /start.
@@ -90,6 +94,7 @@ func (b *Bot) Run(ctx context.Context) {
 		b.log().Error("load bot update offset", "error", err)
 	}
 
+	backoff := time.Duration(0)
 	for {
 		if ctx.Err() != nil {
 			return
@@ -101,8 +106,17 @@ func (b *Bot) Run(ctx context.Context) {
 				return
 			}
 			b.log().Error("get updates", "error", err)
+			backoff = b.nextBackoff(backoff)
+			t := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
 			continue
 		}
+		backoff = 0
 
 		for _, u := range updates {
 			b.handleUpdate(ctx, u)
@@ -117,10 +131,51 @@ func (b *Bot) Run(ctx context.Context) {
 	}
 }
 
+// nextBackoff returns the next GetUpdates retry delay: retryMin (default 1s)
+// first, then doubling up to retryMax (default 30s).
+func (b *Bot) nextBackoff(cur time.Duration) time.Duration {
+	lo, hi := b.retryMin, b.retryMax
+	if lo <= 0 {
+		lo = time.Second
+	}
+	if hi <= 0 {
+		hi = 30 * time.Second
+	}
+	if cur <= 0 {
+		return lo
+	}
+	cur *= 2
+	if cur > hi {
+		cur = hi
+	}
+	return cur
+}
+
 // handleUpdate gates an update on the allowlist and rate limit, then
 // dispatches it. Both gates are silent no-ops: an update from a user who
 // fails either check produces no reply at all.
 func (b *Bot) handleUpdate(ctx context.Context, u Update) {
+	// One bad update must never take the whole process down.
+	defer func() {
+		if r := recover(); r != nil {
+			b.log().Error("panic while handling update", "update_id", u.UpdateID, "panic", r)
+		}
+	}()
+
+	// Only private chats are served: in a group the bot's replies (customer
+	// PII) would be visible to everyone there. Telegram always sets the type;
+	// an empty one is let through only so hand-built updates keep working.
+	switch {
+	case u.Message != nil:
+		if t := u.Message.Chat.Type; t != "" && t != "private" {
+			return
+		}
+	case u.CallbackQuery != nil && u.CallbackQuery.Message != nil:
+		if t := u.CallbackQuery.Message.Chat.Type; t != "" && t != "private" {
+			return
+		}
+	}
+
 	var userID int64
 	switch {
 	case u.Message != nil && u.Message.From != nil:
@@ -198,28 +253,19 @@ func (b *Bot) handleCallback(ctx context.Context, cq *CallbackQuery) {
 	action := strings.SplitN(cq.Data, ":", 2)[0]
 	switch action {
 	case "confirm_review":
-		// Parsing the last ":"-separated segment yields an error for a missing
-		// or non-numeric id, in which case the callback is still answered.
-		parts := strings.SplitN(cq.Data, ":", 2)
-		contactID, err := strconv.ParseInt(parts[len(parts)-1], 10, 64)
+		contactID, err := parseCallbackOrderID(cq.Data)
 		if err != nil {
-			if err := b.Client.AnswerCallbackQuery(ctx, cq.ID, "Некоректний запит"); err != nil {
-				b.log().Error("answer callback query", "error", err, "callback_id", cq.ID)
-			}
+			b.answerCallback(ctx, cq, invalidRequestMessage)
 			return
 		}
 		b.actionConfirmReview(ctx, cq, contactID)
 	case "create_ttn", "create_ttn_confirm", "create_ttn_cancel", "delete_ttn", "delete_ttn_confirm":
-		// Every one of these five actions is money-critical (create_ttn*) or
-		// at least state-changing (delete_ttn*), so a malformed/missing order
-		// id must still answer the callback here rather than falling through
-		// unanswered; the parsed id is then handed to the matching action,
-		// which answers on every other path itself.
+		// A malformed/missing order id must still answer the callback here
+		// rather than falling through unanswered; the parsed id is then
+		// handed to the matching action, which answers on every other path.
 		orderID, err := parseCallbackOrderID(cq.Data)
 		if err != nil {
-			if err := b.Client.AnswerCallbackQuery(ctx, cq.ID, "Некоректний запит"); err != nil {
-				b.log().Error("answer callback query", "error", err, "callback_id", cq.ID)
-			}
+			b.answerCallback(ctx, cq, invalidRequestMessage)
 			return
 		}
 		switch action {
@@ -235,10 +281,8 @@ func (b *Bot) handleCallback(ctx context.Context, cq *CallbackQuery) {
 			b.actionDeleteTTNConfirm(ctx, cq, orderID)
 		}
 	case "set_status":
-		// "set_status:<id>:<status>" needs a 3-way split: the action was
-		// already peeled off above by the default 2-way split on the first
-		// ":"; the remainder still needs a second split into id and status
-		// (parseSetStatusCallback does that second split).
+		// "set_status:<id>:<status>" needs a second split after the action
+		// prefix is peeled off (parseSetStatusCallback does that).
 		parts := strings.SplitN(cq.Data, ":", 2)
 		rest := ""
 		if len(parts) == 2 {
@@ -246,18 +290,14 @@ func (b *Bot) handleCallback(ctx context.Context, cq *CallbackQuery) {
 		}
 		orderID, status, err := parseSetStatusCallback(rest)
 		if err != nil {
-			if err := b.Client.AnswerCallbackQuery(ctx, cq.ID, "Некоректний запит"); err != nil {
-				b.log().Error("answer callback query", "error", err, "callback_id", cq.ID)
-			}
+			b.answerCallback(ctx, cq, invalidRequestMessage)
 			return
 		}
 		b.actionSetStatusStart(ctx, cq, orderID, status)
 	case "set_status_confirm", "set_status_cancel":
 		orderID, err := parseCallbackOrderID(cq.Data)
 		if err != nil {
-			if err := b.Client.AnswerCallbackQuery(ctx, cq.ID, "Некоректний запит"); err != nil {
-				b.log().Error("answer callback query", "error", err, "callback_id", cq.ID)
-			}
+			b.answerCallback(ctx, cq, invalidRequestMessage)
 			return
 		}
 		if action == "set_status_confirm" {
@@ -266,8 +306,6 @@ func (b *Bot) handleCallback(ctx context.Context, cq *CallbackQuery) {
 			b.actionSetStatusCancel(ctx, cq, orderID)
 		}
 	default:
-		if err := b.Client.AnswerCallbackQuery(ctx, cq.ID, ""); err != nil {
-			b.log().Error("answer callback query", "error", err, "callback_id", cq.ID)
-		}
+		b.answerCallback(ctx, cq, "")
 	}
 }

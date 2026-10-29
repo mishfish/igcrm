@@ -54,7 +54,7 @@ func TestSetStatus_ConfirmWithMismatchedOrderIDIsRejected(t *testing.T) {
 	cl := &fakeClient{}
 	b := &Bot{Store: st, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
 	userID := int64(111)
-	b.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "paid", Step: "confirm", CreatedAt: time.Now()})
+	b.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "paid", Step: "confirm", PromptMsgID: 1, CreatedAt: time.Now()})
 	// Confirm tap carries a different order id than the pending action. Take
 	// atomically consumes whatever is pending (same as the established
 	// create_ttn/delete_ttn confirm pattern) before checking it matches, so
@@ -74,7 +74,7 @@ func TestSetStatus_RepeatedConfirmAfterSuccessDoesNotCallTwice(t *testing.T) {
 	cl := &fakeClient{}
 	b := &Bot{Store: st, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
 	userID := int64(111)
-	b.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "paid", Step: "confirm", CreatedAt: time.Now()})
+	b.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "paid", Step: "confirm", PromptMsgID: 1, CreatedAt: time.Now()})
 	cq := &CallbackQuery{ID: "cb1", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: 1}, MessageID: 1}}
 	b.actionSetStatusConfirm(context.Background(), cq, 10)
 	b.actionSetStatusConfirm(context.Background(), cq, 10) // redelivered
@@ -88,7 +88,7 @@ func TestSetStatus_StoreErrorIsShownVerbatimAndNotLogged(t *testing.T) {
 	cl := &fakeClient{}
 	b := &Bot{Store: st, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
 	userID := int64(111)
-	b.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "paid", Step: "confirm", CreatedAt: time.Now()})
+	b.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "paid", Step: "confirm", PromptMsgID: 1, CreatedAt: time.Now()})
 	b.actionSetStatusConfirm(context.Background(), &CallbackQuery{ID: "cb1", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: 1}, MessageID: 1}}, 10)
 	if len(cl.edited) != 1 || !strings.Contains(cl.edited[0].text, "недопустимий статус") {
 		t.Fatalf("expected the store error to reach the user verbatim: %+v", cl.edited)
@@ -106,7 +106,7 @@ func TestSetStatus_CancelClearsOnlyMatchingPendingAndAnswersOnce(t *testing.T) {
 	cl := &fakeClient{}
 	b := &Bot{Store: st, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
 	userID := int64(111)
-	b.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "paid", Step: "confirm", CreatedAt: time.Now()})
+	b.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "paid", Step: "confirm", PromptMsgID: 1, CreatedAt: time.Now()})
 	cq := &CallbackQuery{ID: "cb1", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: 1}, MessageID: 1}}
 	b.actionSetStatusCancel(context.Background(), cq, 10)
 	if _, ok := b.Pending.Get(userID); ok {
@@ -150,7 +150,7 @@ func TestHandleCallback_SetStatusConfirmAndCancelDispatch(t *testing.T) {
 	cl := &fakeClient{}
 	b := &Bot{Store: st, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
 	userID := int64(111)
-	b.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "delivered", Step: "confirm", CreatedAt: time.Now()})
+	b.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "delivered", Step: "confirm", PromptMsgID: 1, CreatedAt: time.Now()})
 	cq := &CallbackQuery{ID: "cb1", From: User{ID: userID}, Data: "set_status_confirm:10", Message: &Message{Chat: Chat{ID: 1}, MessageID: 1}}
 	b.handleCallback(context.Background(), cq)
 	if len(st.setStatusCalls) != 1 || st.setStatusCalls[0].status != "delivered" {
@@ -163,7 +163,7 @@ func TestHandleCallback_SetStatusConfirmAndCancelDispatch(t *testing.T) {
 	st2 := &fakeStore{}
 	cl2 := &fakeClient{}
 	b2 := &Bot{Store: st2, Client: cl2, Pending: NewPendingStore(time.Minute), Log: discardLog()}
-	b2.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "returned", Step: "confirm", CreatedAt: time.Now()})
+	b2.Pending.Set(userID, PendingAction{Kind: "set_status", OrderID: 10, Status: "returned", Step: "confirm", PromptMsgID: 1, CreatedAt: time.Now()})
 	cq2 := &CallbackQuery{ID: "cb2", From: User{ID: userID}, Data: "set_status_cancel:10", Message: &Message{Chat: Chat{ID: 1}, MessageID: 1}}
 	b2.handleCallback(context.Background(), cq2)
 	if _, ok := b2.Pending.Get(userID); ok {

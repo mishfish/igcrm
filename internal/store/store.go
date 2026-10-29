@@ -655,11 +655,15 @@ func (s *Store) BotOrder(ctx context.Context, id int64) (BotOrder, error) {
 	return o, nil
 }
 
-// OrdersPendingShipment повертає замовлення без ТТН, які очікують відправки (нові або очікують оплати).
+// shippableOrderCond — спільна умова черги відправки: замовлення без ТТН, які
+// ще не відправлені і не скасовані (нові, оплачені, у виробництві тощо).
+const shippableOrderCond = `ttn IS NULL AND status NOT IN ('shipped', 'delivered', 'returned', 'cancelled')`
+
+// OrdersPendingShipment повертає замовлення без ТТН, які ще не відправлені і не скасовані.
 func (s *Store) OrdersPendingShipment(ctx context.Context, limit int) ([]int64, error) {
 	return s.queryIDs(ctx, `
 		SELECT id FROM orders
-		WHERE status IN ('new', 'awaiting_payment') AND ttn IS NULL
+		WHERE `+shippableOrderCond+`
 		ORDER BY created_at LIMIT $1`, limit)
 }
 
@@ -667,7 +671,7 @@ func (s *Store) OrdersPendingShipment(ctx context.Context, limit int) ([]int64, 
 func (s *Store) OrdersPendingTTNPush(ctx context.Context, limit int) ([]int64, error) {
 	return s.queryIDs(ctx, `
 		SELECT id FROM orders
-		WHERE status IN ('new', 'awaiting_payment') AND ttn IS NULL AND bot_ttn_pushed_at IS NULL
+		WHERE `+shippableOrderCond+` AND bot_ttn_pushed_at IS NULL
 		ORDER BY created_at LIMIT $1`, limit)
 }
 

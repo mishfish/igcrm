@@ -7,12 +7,16 @@ import (
 
 // PendingAction describes a multi-step dialog a user is in the middle of.
 type PendingAction struct {
-	Kind      string
-	OrderID   int64
-	Step      string
-	Weight    float64
-	Status    string
-	CreatedAt time.Time
+	Kind    string
+	OrderID int64
+	Step    string
+	Weight  float64
+	Status  string
+	// PromptMsgID is the Telegram message id of the confirm prompt this
+	// action was issued with; a confirm tap is only honored when it comes from
+	// that very message.
+	PromptMsgID int64
+	CreatedAt   time.Time
 }
 
 // PendingStore keeps at most one pending action per user, expiring entries
@@ -84,5 +88,27 @@ func (p *PendingStore) Take(userID int64) (PendingAction, bool) {
 	if p.now().Sub(a.CreatedAt) > p.ttl {
 		return PendingAction{}, false
 	}
+	return a, true
+}
+
+// TakeIf atomically consumes the pending action for userID only if it is
+// present, unexpired and match returns true, all under one lock. A
+// non-matching (or expired) action is left untouched, except that an expired
+// one is removed, same as Get.
+func (p *PendingStore) TakeIf(userID int64, match func(PendingAction) bool) (PendingAction, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a, ok := p.items[userID]
+	if !ok {
+		return PendingAction{}, false
+	}
+	if p.now().Sub(a.CreatedAt) > p.ttl {
+		delete(p.items, userID)
+		return PendingAction{}, false
+	}
+	if !match(a) {
+		return PendingAction{}, false
+	}
+	delete(p.items, userID)
 	return a, true
 }

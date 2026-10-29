@@ -10,6 +10,64 @@ import (
 	"time"
 )
 
+// invalidRequestMessage answers a callback whose data cannot be parsed.
+const invalidRequestMessage = "Некоректний запит"
+
+// openActionHint is sent when the user writes something while a dialog is
+// waiting on a button tap.
+const openActionHint = "Є незавершена дія — підтвердь або скасуй кнопкою, або надішли /cancel."
+
+// sideEffectTimeout bounds a confirm's real side effects once started.
+const sideEffectTimeout = 60 * time.Second
+
+// sideEffectCtx detaches a confirm's side effects (Nova Poshta call + audit
+// row) from ctx cancellation so a SIGTERM mid-call cannot abort a shipment
+// halfway and lose the record, while still bounding them with a timeout.
+func sideEffectCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), sideEffectTimeout)
+}
+
+// logAction writes an audit row; on failure the fallback log line carries the
+// whole record so it can be reconstructed from logs.
+func (b *Bot) logAction(ctx context.Context, tgUserID int64, action string, contactID, orderID *int64, detail json.RawMessage) {
+	if err := b.Store.LogBotAction(ctx, tgUserID, action, contactID, orderID, detail); err != nil {
+		attrs := []any{"error", err, "tg_user_id", tgUserID, "action", action, "detail", string(detail)}
+		if contactID != nil {
+			attrs = append(attrs, "contact_id", *contactID)
+		}
+		if orderID != nil {
+			attrs = append(attrs, "order_id", *orderID)
+		}
+		b.log().Error("log bot action", attrs...)
+	}
+}
+
+// takeConfirm atomically consumes the user's pending action iff it is the
+// confirm-step action of the given kind/order AND the tap comes from the very
+// prompt message that action was issued with. Otherwise the current pending
+// action is left intact, the stale prompt (if the user has another dialog
+// open) loses its keyboard, and the callback is answered as stale.
+func (b *Bot) takeConfirm(ctx context.Context, cq *CallbackQuery, kind string, orderID int64) (PendingAction, bool) {
+	p, ok := b.Pending.TakeIf(cq.From.ID, func(p PendingAction) bool {
+		return p.Kind == kind && p.OrderID == orderID && p.Step == "confirm" &&
+			cq.Message != nil && cq.Message.MessageID == p.PromptMsgID
+	})
+	if ok {
+		return p, true
+	}
+	// Only touch the message when another dialog is open: after a completed
+	// confirm the message already shows the result and must not be overwritten.
+	if _, open := b.Pending.Get(cq.From.ID); open && cq.Message != nil {
+		text := "Застаріло."
+		if cq.Message.Text != "" {
+			text = cq.Message.Text + "\n\n(застаріло)"
+		}
+		b.editCallbackMessage(ctx, cq, text)
+	}
+	b.answerCallback(ctx, cq, staleActionMessage)
+	return PendingAction{}, false
+}
+
 // ttnConfigErrorMessage is sent whenever an action needs b.Shipping but it is
 // nil (NP_API_KEY not configured on this deployment).
 const ttnConfigErrorMessage = "ТТН не налаштована на сервері (NP_API_KEY)."
@@ -70,13 +128,30 @@ func (b *Bot) answerCallback(ctx context.Context, cq *CallbackQuery, text string
 // the success path of a confirm would crash Run and lose the LogBotAction
 // audit entry for a shipment/cancellation that already genuinely happened.
 func (b *Bot) editCallbackMessage(ctx context.Context, cq *CallbackQuery, text string) {
+	b.editCallbackMessageKB(ctx, cq, text, nil)
+}
+
+// editCallbackMessageKB is editCallbackMessage with an optional keyboard.
+func (b *Bot) editCallbackMessageKB(ctx context.Context, cq *CallbackQuery, text string, kb *InlineKeyboardMarkup) {
 	if cq.Message == nil {
 		b.log().Error("edit message: callback has no attached message", "callback_id", cq.ID)
 		return
 	}
-	if err := b.Client.EditMessageText(ctx, cq.Message.Chat.ID, cq.Message.MessageID, text, nil); err != nil {
+	if err := b.Client.EditMessageText(ctx, cq.Message.Chat.ID, cq.Message.MessageID, text, kb); err != nil {
 		b.log().Error("edit message", "error", err, "chat_id", cq.Message.Chat.ID)
 	}
+}
+
+// orderActionsKeyboard fetches the order and builds its action keyboard for a
+// result message. The action it follows has already completed, so a lookup
+// failure is only logged and yields nil (message edited without a keyboard).
+func (b *Bot) orderActionsKeyboard(ctx context.Context, orderID int64) *InlineKeyboardMarkup {
+	order, err := b.Store.BotOrder(ctx, orderID)
+	if err != nil {
+		b.log().Error("load order for result keyboard", "error", err, "order_id", orderID)
+		return nil
+	}
+	return OrderActionsKeyboard(order, b.DirectusURL)
 }
 
 // callbackChatID returns the chat id of the message a callback is attached
@@ -147,28 +222,27 @@ func (b *Bot) actionCreateTTNCancel(ctx context.Context, cq *CallbackQuery, orde
 // on another goroutine cannot both observe the pending action as present —
 // the second one always finds it already gone and is rejected above.
 func (b *Bot) actionCreateTTNConfirm(ctx context.Context, cq *CallbackQuery, orderID int64) {
-	p, ok := b.Pending.Take(cq.From.ID)
-	if !ok || p.Kind != "create_ttn" || p.OrderID != orderID || p.Step != "confirm" {
-		b.answerCallback(ctx, cq, staleActionMessage)
+	p, ok := b.takeConfirm(ctx, cq, "create_ttn", orderID)
+	if !ok {
 		return
 	}
 
 	weight := p.Weight
-	ttn, err := b.Shipping.CreateTTN(ctx, orderID, weight, 0)
+	execCtx, cancel := sideEffectCtx(ctx)
+	defer cancel()
+	ttn, err := b.Shipping.CreateTTN(execCtx, orderID, weight, 0)
 	if err != nil {
 		b.editCallbackMessage(ctx, cq, "Помилка: "+err.Error())
 		b.answerCallback(ctx, cq, "")
 		return
 	}
 
-	b.editCallbackMessage(ctx, cq, "ТТН створено: "+ttn)
+	b.editCallbackMessageKB(ctx, cq, "ТТН створено: "+ttn, b.orderActionsKeyboard(execCtx, orderID))
 	detail, _ := json.Marshal(struct {
 		TTN    string  `json:"ttn"`
 		Weight float64 `json:"weight"`
 	}{ttn, weight})
-	if err := b.Store.LogBotAction(ctx, cq.From.ID, "create_ttn", nil, &orderID, detail); err != nil {
-		b.log().Error("log bot action", "error", err, "tg_user_id", cq.From.ID)
-	}
+	b.logAction(execCtx, cq.From.ID, "create_ttn", nil, &orderID, detail)
 	b.answerCallback(ctx, cq, "ТТН створено")
 }
 
@@ -189,36 +263,35 @@ func (b *Bot) actionDeleteTTNStart(ctx context.Context, cq *CallbackQuery, order
 		return
 	}
 
-	b.Pending.Set(cq.From.ID, PendingAction{Kind: "delete_ttn", OrderID: orderID, Step: "confirm", CreatedAt: time.Now()})
 	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
 		{{Text: "✅ Підтвердити", CallbackData: fmt.Sprintf("delete_ttn_confirm:%d", orderID)}},
 	}}
 	text := fmt.Sprintf("Скасувати ТТН замовлення #%d? /cancel — залишити.", orderID)
-	if _, err := b.Client.SendMessage(ctx, chatID, text, kb); err != nil {
+	msgID, err := b.Client.SendMessage(ctx, chatID, text, kb)
+	if err != nil {
 		b.log().Error("send message", "error", err, "chat_id", chatID)
 	}
+	b.Pending.Set(cq.From.ID, PendingAction{Kind: "delete_ttn", OrderID: orderID, Step: "confirm", PromptMsgID: msgID, CreatedAt: time.Now()})
 	b.answerCallback(ctx, cq, "")
 }
 
 // actionDeleteTTNConfirm mirrors actionCreateTTNConfirm's safety ordering
 // (Pending.Take before calling Shipping), without a weight.
 func (b *Bot) actionDeleteTTNConfirm(ctx context.Context, cq *CallbackQuery, orderID int64) {
-	p, ok := b.Pending.Take(cq.From.ID)
-	if !ok || p.Kind != "delete_ttn" || p.OrderID != orderID || p.Step != "confirm" {
-		b.answerCallback(ctx, cq, staleActionMessage)
+	if _, ok := b.takeConfirm(ctx, cq, "delete_ttn", orderID); !ok {
 		return
 	}
 
-	if err := b.Shipping.DeleteTTN(ctx, orderID); err != nil {
+	execCtx, cancel := sideEffectCtx(ctx)
+	defer cancel()
+	if err := b.Shipping.DeleteTTN(execCtx, orderID); err != nil {
 		b.editCallbackMessage(ctx, cq, "Помилка: "+err.Error())
 		b.answerCallback(ctx, cq, "")
 		return
 	}
 
 	b.editCallbackMessage(ctx, cq, "ТТН скасовано.")
-	if err := b.Store.LogBotAction(ctx, cq.From.ID, "delete_ttn", nil, &orderID, nil); err != nil {
-		b.log().Error("log bot action", "error", err, "tg_user_id", cq.From.ID)
-	}
+	b.logAction(execCtx, cq.From.ID, "delete_ttn", nil, &orderID, nil)
 	b.answerCallback(ctx, cq, "ТТН скасовано")
 }
 
@@ -231,7 +304,7 @@ func (b *Bot) actionDeleteTTNConfirm(ctx context.Context, cq *CallbackQuery, ord
 func (b *Bot) handlePendingReply(ctx context.Context, m *Message, p PendingAction) bool {
 	userID := m.From.ID
 
-	if m.Text == "/cancel" {
+	if m.Text == "/cancel" || strings.HasPrefix(m.Text, "/cancel@") {
 		b.Pending.Clear(userID)
 		b.send(ctx, m.Chat.ID, "Скасовано.")
 		return true
@@ -246,18 +319,22 @@ func (b *Bot) handlePendingReply(ctx context.Context, m *Message, p PendingActio
 
 		p.Weight = weight
 		p.Step = "confirm"
-		b.Pending.Set(userID, p)
 
 		text := fmt.Sprintf("Замовлення #%d: створити ТТН, вага %.2f кг?", p.OrderID, weight)
-		if _, err := b.Client.SendMessage(ctx, m.Chat.ID, text, createTTNConfirmKeyboard(p.OrderID)); err != nil {
+		msgID, err := b.Client.SendMessage(ctx, m.Chat.ID, text, createTTNConfirmKeyboard(p.OrderID))
+		if err != nil {
 			b.log().Error("send message", "error", err, "chat_id", m.Chat.ID)
 		}
+		p.PromptMsgID = msgID
+		b.Pending.Set(userID, p)
 		return true
 	}
 
 	// A pending action exists but isn't waiting on free text (e.g. it's
 	// sitting at a "confirm" step meant to be resolved by tapping a button).
 	// Consume the message anyway rather than letting it fall through to an
-	// unrelated command while a money-critical dialog is still open.
+	// unrelated command while a money-critical dialog is still open, but tell
+	// the user why nothing happened.
+	b.send(ctx, m.Chat.ID, openActionHint)
 	return true
 }

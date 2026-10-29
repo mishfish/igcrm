@@ -56,7 +56,7 @@ func TestCreateTTN_HappyPath(t *testing.T) {
 		t.Fatalf("pending after weight: %+v", p)
 	}
 
-	b.actionCreateTTNConfirm(context.Background(), &CallbackQuery{ID: "cb2", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: chatID}, MessageID: 1}}, 10)
+	b.actionCreateTTNConfirm(context.Background(), &CallbackQuery{ID: "cb2", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: chatID}, MessageID: 2}}, 10)
 	if len(sh.createCalls) != 1 || sh.createCalls[0].weight != 1.2 {
 		t.Fatalf("create calls: %+v", sh.createCalls)
 	}
@@ -92,7 +92,7 @@ func TestCreateTTN_ShippingServiceErrorIsShownVerbatim(t *testing.T) {
 	cl := &fakeClient{}
 	b := &Bot{Store: &fakeStore{}, Shipping: sh, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
 	userID := int64(111)
-	b.Pending.Set(userID, PendingAction{Kind: "create_ttn", OrderID: 10, Step: "confirm", Weight: 1.2, CreatedAt: time.Now()})
+	b.Pending.Set(userID, PendingAction{Kind: "create_ttn", OrderID: 10, Step: "confirm", PromptMsgID: 1, Weight: 1.2, CreatedAt: time.Now()})
 	b.actionCreateTTNConfirm(context.Background(), &CallbackQuery{ID: "cb1", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: 1}, MessageID: 1}}, 10)
 	if len(cl.edited) != 1 || !strings.Contains(cl.edited[0].text, "невідома сума") {
 		t.Fatalf("expected the service error to reach the user verbatim: %+v", cl.edited)
@@ -107,7 +107,7 @@ func TestCreateTTN_RepeatedConfirmAfterSuccessDoesNotCreateASecondTTN(t *testing
 	cl := &fakeClient{}
 	b := &Bot{Store: &fakeStore{}, Shipping: sh, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
 	userID := int64(111)
-	b.Pending.Set(userID, PendingAction{Kind: "create_ttn", OrderID: 10, Step: "confirm", Weight: 1.2, CreatedAt: time.Now()})
+	b.Pending.Set(userID, PendingAction{Kind: "create_ttn", OrderID: 10, Step: "confirm", PromptMsgID: 1, Weight: 1.2, CreatedAt: time.Now()})
 	cq := &CallbackQuery{ID: "cb1", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: 1}, MessageID: 1}}
 	b.actionCreateTTNConfirm(context.Background(), cq, 10)
 	b.actionCreateTTNConfirm(context.Background(), cq, 10) // redelivered
@@ -130,7 +130,7 @@ func TestDeleteTTN_ConfirmCallsShipperDeleteTTN(t *testing.T) {
 	cl := &fakeClient{}
 	b := &Bot{Store: &fakeStore{}, Shipping: sh, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
 	userID := int64(111)
-	b.Pending.Set(userID, PendingAction{Kind: "delete_ttn", OrderID: 10, Step: "confirm", CreatedAt: time.Now()})
+	b.Pending.Set(userID, PendingAction{Kind: "delete_ttn", OrderID: 10, Step: "confirm", PromptMsgID: 1, CreatedAt: time.Now()})
 	b.actionDeleteTTNConfirm(context.Background(), &CallbackQuery{ID: "cb1", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: 1}, MessageID: 1}}, 10)
 	if len(sh.deleteCalls) != 1 || sh.deleteCalls[0] != 10 {
 		t.Fatalf("delete calls: %+v", sh.deleteCalls)
@@ -249,7 +249,7 @@ func TestHandlePendingReply_SlashCancelClearsAnyKind(t *testing.T) {
 	cl := &fakeClient{}
 	b := &Bot{Store: &fakeStore{}, Shipping: &fakeShipper{}, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
 	userID, chatID := int64(111), int64(9001)
-	b.Pending.Set(userID, PendingAction{Kind: "delete_ttn", OrderID: 10, Step: "confirm", CreatedAt: time.Now()})
+	b.Pending.Set(userID, PendingAction{Kind: "delete_ttn", OrderID: 10, Step: "confirm", PromptMsgID: 1, CreatedAt: time.Now()})
 	consumed := b.handlePendingReply(context.Background(), &Message{Chat: Chat{ID: chatID}, From: &User{ID: userID}, Text: "/cancel"}, mustGet(t, b.Pending, userID))
 	if !consumed {
 		t.Error("expected /cancel to be consumed")

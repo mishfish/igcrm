@@ -132,7 +132,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, igc *ig.Clie
 		}
 		bot := &tgbot.Bot{Store: st, Shipping: shipper, Client: tgClient, Allowed: allowed, RateLimit: tgbot.NewRateLimiter(30, time.Minute), Pending: tgbot.NewPendingStore(5 * time.Minute), DirectusURL: cfg.DirectusPublicURL, Log: log}
 		go bot.Run(ctx)
-		go (&tgbot.PushWorker{Store: st, Client: tgClient, DirectusURL: cfg.DirectusPublicURL, Log: log}).Run(ctx)
+		go (&tgbot.PushWorker{Store: st, Client: tgClient, DirectusURL: cfg.DirectusPublicURL, Log: log, Allowed: allowed}).Run(ctx)
 		log.Info("telegram bot enabled", "allowed_users", len(allowed))
 	} else {
 		log.Warn("telegram bot disabled: задай TG_BOT_TOKEN і TG_ALLOWED_USER_IDS")

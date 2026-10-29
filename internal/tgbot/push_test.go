@@ -18,7 +18,7 @@ func TestPushWorker_FansOutReviewAndOrderPushesToAllRegisteredUsers(t *testing.T
 	st.botOrders = map[int64]store.BotOrder{10: {ID: 10}}
 
 	cl := &fakeClient{}
-	w := &PushWorker{Store: st, Client: cl, Log: discardLog()}
+	w := &PushWorker{Store: st, Client: cl, Log: discardLog(), Allowed: Allowlist{111: true, 222: true}}
 	w.Tick(context.Background())
 
 	if len(cl.sent) != 4 { // 1 review card + 1 order card, each to 2 users
@@ -35,7 +35,7 @@ func TestPushWorker_UnregisteredAllowedUserDoesNotBreakFanout(t *testing.T) {
 	// natural behavior, this test just pins it.
 	st := &fakeStore{users: []store.BotUser{{TGUserID: 111, ChatID: 9001}}, reviewPushPending: []int64{1}, contacts: map[int64]store.Contact{1: {ID: 1}}}
 	cl := &fakeClient{}
-	w := &PushWorker{Store: st, Client: cl, Log: discardLog()}
+	w := &PushWorker{Store: st, Client: cl, Log: discardLog(), Allowed: Allowlist{111: true, 222: true}}
 	w.Tick(context.Background())
 	if len(cl.sent) != 1 {
 		t.Fatalf("sent: %+v", cl.sent)
@@ -45,7 +45,7 @@ func TestPushWorker_UnregisteredAllowedUserDoesNotBreakFanout(t *testing.T) {
 func TestPushWorker_NothingPendingSendsNothing(t *testing.T) {
 	st := &fakeStore{users: []store.BotUser{{TGUserID: 111, ChatID: 9001}}}
 	cl := &fakeClient{}
-	w := &PushWorker{Store: st, Client: cl, Log: discardLog()}
+	w := &PushWorker{Store: st, Client: cl, Log: discardLog(), Allowed: Allowlist{111: true, 222: true}}
 	w.Tick(context.Background())
 	if len(cl.sent) != 0 {
 		t.Fatalf("sent: %+v", cl.sent)

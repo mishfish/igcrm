@@ -32,7 +32,8 @@ type Message struct {
 
 // Chat identifies a Telegram chat.
 type Chat struct {
-	ID int64 `json:"id"`
+	ID   int64  `json:"id"`
+	Type string `json:"type"`
 }
 
 // User identifies a Telegram user.

@@ -20,6 +20,17 @@ type PushWorker struct {
 	DirectusURL string
 	Interval    time.Duration
 	Log         *slog.Logger
+	// Allowed restricts recipients: a registered user who is no longer on
+	// TG_ALLOWED_USER_IDS must not keep receiving customer data.
+	Allowed Allowlist
+}
+
+// log returns w.Log, falling back to a discard logger if unset.
+func (w *PushWorker) log() *slog.Logger {
+	if w.Log != nil {
+		return w.Log
+	}
+	return slog.New(slog.DiscardHandler)
 }
 
 // Run ticks until ctx is cancelled, defaulting Interval to 20s if unset.
@@ -47,9 +58,21 @@ func (w *PushWorker) Run(ctx context.Context) {
 func (w *PushWorker) Tick(ctx context.Context) {
 	users, err := w.Store.BotUsers(ctx)
 	if err != nil {
-		w.Log.Error("push: load bot users", "err", err)
+		w.log().Error("push: load bot users", "err", err)
 		return
 	}
+
+	var recipients []store.BotUser
+	for _, u := range users {
+		if w.Allowed.Allowed(u.TGUserID) {
+			recipients = append(recipients, u)
+		}
+	}
+	if len(recipients) == 0 {
+		// Nobody to send to: leave everything unpushed for when someone is.
+		return
+	}
+	users = recipients
 
 	w.tickReviews(ctx, users)
 	w.tickTTNs(ctx, users)
@@ -58,29 +81,29 @@ func (w *PushWorker) Tick(ctx context.Context) {
 func (w *PushWorker) tickReviews(ctx context.Context, users []store.BotUser) {
 	ids, err := w.Store.ContactsPendingReviewPush(ctx, 20)
 	if err != nil {
-		w.Log.Error("push: contacts pending review push", "err", err)
+		w.log().Error("push: contacts pending review push", "err", err)
 		return
 	}
 	for _, id := range ids {
 		c, err := w.Store.Contact(ctx, id)
 		if err != nil {
-			w.Log.Error("push: load contact", "contact", id, "err", err)
+			w.log().Error("push: load contact", "contact", id, "err", err)
 			continue
 		}
 		ext, err := w.Store.LastExtraction(ctx, id)
 		if err != nil {
-			w.Log.Error("push: load last extraction", "contact", id, "err", err)
+			w.log().Error("push: load last extraction", "contact", id, "err", err)
 			continue
 		}
 		text := RenderContactCard(c, ext.Changes)
 		kb := ReviewKeyboard(id, w.DirectusURL)
 		for _, u := range users {
 			if _, err := w.Client.SendMessage(ctx, u.ChatID, text, kb); err != nil {
-				w.Log.Error("push: send review card", "contact", id, "chat_id", u.ChatID, "err", err)
+				w.log().Error("push: send review card", "contact", id, "chat_id", u.ChatID, "err", err)
 			}
 		}
 		if err := w.Store.MarkReviewPushed(ctx, id); err != nil {
-			w.Log.Error("push: mark review pushed", "contact", id, "err", err)
+			w.log().Error("push: mark review pushed", "contact", id, "err", err)
 		}
 	}
 }
@@ -88,24 +111,24 @@ func (w *PushWorker) tickReviews(ctx context.Context, users []store.BotUser) {
 func (w *PushWorker) tickTTNs(ctx context.Context, users []store.BotUser) {
 	ids, err := w.Store.OrdersPendingTTNPush(ctx, 20)
 	if err != nil {
-		w.Log.Error("push: orders pending ttn push", "err", err)
+		w.log().Error("push: orders pending ttn push", "err", err)
 		return
 	}
 	for _, id := range ids {
 		o, err := w.Store.BotOrder(ctx, id)
 		if err != nil {
-			w.Log.Error("push: load order", "order", id, "err", err)
+			w.log().Error("push: load order", "order", id, "err", err)
 			continue
 		}
 		text := RenderOrderSummary(o)
 		kb := OrderActionsKeyboard(o, w.DirectusURL)
 		for _, u := range users {
 			if _, err := w.Client.SendMessage(ctx, u.ChatID, text, kb); err != nil {
-				w.Log.Error("push: send order card", "order", id, "chat_id", u.ChatID, "err", err)
+				w.log().Error("push: send order card", "order", id, "chat_id", u.ChatID, "err", err)
 			}
 		}
 		if err := w.Store.MarkTTNPushed(ctx, id); err != nil {
-			w.Log.Error("push: mark ttn pushed", "order", id, "err", err)
+			w.log().Error("push: mark ttn pushed", "order", id, "err", err)
 		}
 	}
 }

@@ -53,11 +53,12 @@ func (b *Bot) actionSetStatusStart(ctx context.Context, cq *CallbackQuery, order
 		return
 	}
 
-	b.Pending.Set(cq.From.ID, PendingAction{Kind: "set_status", OrderID: orderID, Status: status, Step: "confirm", CreatedAt: time.Now()})
 	text := fmt.Sprintf("Позначити замовлення #%d як %q?", orderID, status)
-	if _, err := b.Client.SendMessage(ctx, chatID, text, setStatusConfirmKeyboard(orderID)); err != nil {
+	msgID, err := b.Client.SendMessage(ctx, chatID, text, setStatusConfirmKeyboard(orderID))
+	if err != nil {
 		b.log().Error("send message", "error", err, "chat_id", chatID)
 	}
+	b.Pending.Set(cq.From.ID, PendingAction{Kind: "set_status", OrderID: orderID, Status: status, Step: "confirm", PromptMsgID: msgID, CreatedAt: time.Now()})
 	b.answerCallback(ctx, cq, "")
 }
 
@@ -83,9 +84,8 @@ func (b *Bot) actionSetStatusCancel(ctx context.Context, cq *CallbackQuery, orde
 // there's no reason to fall back to the weaker Get+Clear pattern now that
 // Take is the established idiom in this package.
 func (b *Bot) actionSetStatusConfirm(ctx context.Context, cq *CallbackQuery, orderID int64) {
-	p, ok := b.Pending.Take(cq.From.ID)
-	if !ok || p.Kind != "set_status" || p.OrderID != orderID {
-		b.answerCallback(ctx, cq, staleActionMessage)
+	p, ok := b.takeConfirm(ctx, cq, "set_status", orderID)
+	if !ok {
 		return
 	}
 
@@ -95,12 +95,10 @@ func (b *Bot) actionSetStatusConfirm(ctx context.Context, cq *CallbackQuery, ord
 		return
 	}
 
-	b.editCallbackMessage(ctx, cq, fmt.Sprintf("Статус замовлення #%d змінено на %q.", orderID, p.Status))
+	b.editCallbackMessageKB(ctx, cq, fmt.Sprintf("Статус замовлення #%d змінено на %q.", orderID, p.Status), b.orderActionsKeyboard(ctx, orderID))
 	detail, _ := json.Marshal(struct {
 		Status string `json:"status"`
 	}{p.Status})
-	if err := b.Store.LogBotAction(ctx, cq.From.ID, "set_status", nil, &orderID, detail); err != nil {
-		b.log().Error("log bot action", "error", err, "tg_user_id", cq.From.ID)
-	}
+	b.logAction(ctx, cq.From.ID, "set_status", nil, &orderID, detail)
 	b.answerCallback(ctx, cq, "Статус оновлено")
 }
