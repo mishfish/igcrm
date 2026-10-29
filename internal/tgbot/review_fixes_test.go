@@ -82,9 +82,11 @@ func TestCreateTTN_StaleConfirmOnSupersededPromptIsRejected(t *testing.T) {
 		return cl.nextMessageID
 	}
 	start()
-	promptA := reply("1")
+	reply("1")
+	promptA := reply("1500")
 	start() // re-open the dialog; weight prompt replaced pending
-	promptB := reply("2.5")
+	reply("2.5")
+	promptB := reply("1500")
 
 	cq := func(id int64) *CallbackQuery {
 		return &CallbackQuery{ID: "c", From: User{ID: 111}, Message: &Message{Chat: Chat{ID: 1}, MessageID: id}}

@@ -286,6 +286,10 @@ func TestOrderForShippingAndSetTTN(t *testing.T) {
 	if order.TTN != nil || order.NPDocRef != nil {
 		t.Errorf("ttn/np_doc_ref not cleared: ttn=%v doc_ref=%v", order.TTN, order.NPDocRef)
 	}
+	db.QueryRow(`SELECT status FROM orders WHERE id = $1`, orderID).Scan(&status)
+	if status != "new" {
+		t.Errorf("status after cancelling ttn = %q, want new (shipped must not survive without a ttn)", status)
+	}
 
 	// повторне скасування вже очищеного замовлення — помилка
 	if err := st.ClearOrderTTN(ctx, orderID); err == nil {

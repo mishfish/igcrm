@@ -101,6 +101,55 @@ func parseWeight(text string) (float64, bool) {
 	return w, true
 }
 
+// maxDeclaredValueUAH bounds what parseDeclaredValue accepts.
+const maxDeclaredValueUAH = 1000000.0
+
+// parseDeclaredValue parses a free-text declared-value reply such as "1500" or
+// "1500,50" into a non-negative UAH amount. 0 is syntactically valid (it means
+// "use the order amount"; the caller decides whether that is allowed).
+// NaN, Inf, negatives and values above maxDeclaredValueUAH are rejected.
+func parseDeclaredValue(text string) (float64, bool) {
+	v, err := strconv.ParseFloat(strings.ReplaceAll(strings.TrimSpace(text), ",", "."), 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > maxDeclaredValueUAH {
+		return 0, false
+	}
+	return v, true
+}
+
+// orderAmount returns the order's known positive amount; false if the order
+// has no amount or cannot be loaded.
+func (b *Bot) orderAmount(ctx context.Context, orderID int64) (float64, bool) {
+	order, err := b.Store.BotOrder(ctx, orderID)
+	if err != nil {
+		b.log().Error("load order for declared value", "error", err, "order_id", orderID)
+		return 0, false
+	}
+	if order.Amount == nil || *order.Amount <= 0 {
+		return 0, false
+	}
+	return *order.Amount, true
+}
+
+// declaredPrompt builds the declared-value question, with a hint about the
+// order amount when it is known.
+func declaredPrompt(amount float64, hasAmount bool) string {
+	text := "Оголошена вартість у грн (наприклад 1500)."
+	if hasAmount {
+		text += fmt.Sprintf(" Надішліть 0, щоб взяти суму замовлення (%s грн).", formatUAH(amount))
+	}
+	return text
+}
+
+func formatUAH(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// invalidDeclaredMessage re-prompts after an unparsable declared value.
+const invalidDeclaredMessage = "Не розпізнав вартість, спробуй ще раз (наприклад 1500)."
+
+// noAmountMessage re-prompts when 0 was sent but the order has no amount.
+const noAmountMessage = "У замовлення немає суми — вкажи реальну оголошену вартість у грн (наприклад 1500)."
+
 // staleActionMessage answers a confirm/cancel tap that no longer has a
 // matching pending action: either it was already handled (a redelivered
 // double-tap) or it belongs to a different, expired dialog.
@@ -230,7 +279,7 @@ func (b *Bot) actionCreateTTNConfirm(ctx context.Context, cq *CallbackQuery, ord
 	weight := p.Weight
 	execCtx, cancel := sideEffectCtx(ctx)
 	defer cancel()
-	ttn, err := b.Shipping.CreateTTN(execCtx, orderID, weight, 0)
+	ttn, err := b.Shipping.CreateTTN(execCtx, orderID, weight, p.DeclaredValue)
 	if err != nil {
 		b.editCallbackMessage(ctx, cq, "Помилка: "+err.Error())
 		b.answerCallback(ctx, cq, "")
@@ -239,9 +288,10 @@ func (b *Bot) actionCreateTTNConfirm(ctx context.Context, cq *CallbackQuery, ord
 
 	b.editCallbackMessageKB(ctx, cq, "ТТН створено: "+ttn, b.orderActionsKeyboard(execCtx, orderID))
 	detail, _ := json.Marshal(struct {
-		TTN    string  `json:"ttn"`
-		Weight float64 `json:"weight"`
-	}{ttn, weight})
+		TTN           string  `json:"ttn"`
+		Weight        float64 `json:"weight"`
+		DeclaredValue float64 `json:"declared_value"`
+	}{ttn, weight, p.DeclaredValue})
 	b.logAction(execCtx, cq.From.ID, "create_ttn", nil, &orderID, detail)
 	b.answerCallback(ctx, cq, "ТТН створено")
 }
@@ -318,9 +368,33 @@ func (b *Bot) handlePendingReply(ctx context.Context, m *Message, p PendingActio
 		}
 
 		p.Weight = weight
+		p.Step = "await_declared"
+		b.Pending.Set(userID, p)
+		amount, has := b.orderAmount(ctx, p.OrderID)
+		b.send(ctx, m.Chat.ID, declaredPrompt(amount, has))
+		return true
+	}
+
+	if p.Kind == "create_ttn" && p.Step == "await_declared" {
+		value, ok := parseDeclaredValue(m.Text)
+		if !ok {
+			b.send(ctx, m.Chat.ID, invalidDeclaredMessage)
+			return true
+		}
+		valueText := formatUAH(value) + " грн"
+		if value == 0 {
+			amount, has := b.orderAmount(ctx, p.OrderID)
+			if !has {
+				b.send(ctx, m.Chat.ID, noAmountMessage)
+				return true
+			}
+			valueText = fmt.Sprintf("сума замовлення (%s грн)", formatUAH(amount))
+		}
+
+		p.DeclaredValue = value
 		p.Step = "confirm"
 
-		text := fmt.Sprintf("Замовлення #%d: створити ТТН, вага %.2f кг?", p.OrderID, weight)
+		text := fmt.Sprintf("Замовлення #%d: створити ТТН, вага %.2f кг, оголошена вартість: %s?", p.OrderID, p.Weight, valueText)
 		msgID, err := b.Client.SendMessage(ctx, m.Chat.ID, text, createTTNConfirmKeyboard(p.OrderID))
 		if err != nil {
 			b.log().Error("send message", "error", err, "chat_id", m.Chat.ID)

@@ -464,11 +464,14 @@ func (s *Store) SetOrderTTN(ctx context.Context, id int64, ttn, docRef string) e
 	return nil
 }
 
-// ClearOrderTTN прибирає ттн/np_doc_ref після скасування накладної (статус лишає
-// як є — користувач сам повертає картку в потрібну колонку Kanban).
+// ClearOrderTTN прибирає ттн/np_doc_ref після скасування накладної. Статус "shipped"
+// (його ставить лише SetOrderTTN) повертає в "new" — інакше лишилось би "shipped без ТТН",
+// і замовлення випало б з /orders. Попередній статус не зберігається; інші статуси не чіпаємо.
 func (s *Store) ClearOrderTTN(ctx context.Context, id int64) error {
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE orders SET ttn = NULL, np_doc_ref = NULL WHERE id = $1 AND ttn IS NOT NULL`, id)
+		UPDATE orders SET ttn = NULL, np_doc_ref = NULL,
+			status = CASE WHEN status = 'shipped' THEN 'new' ELSE status END
+		WHERE id = $1 AND ttn IS NOT NULL`, id)
 	if err != nil {
 		return err
 	}

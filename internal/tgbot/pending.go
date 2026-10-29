@@ -11,7 +11,9 @@ type PendingAction struct {
 	OrderID int64
 	Step    string
 	Weight  float64
-	Status  string
+	// DeclaredValue is the declared value in UAH; 0 means "use the order amount".
+	DeclaredValue float64
+	Status        string
 	// PromptMsgID is the Telegram message id of the confirm prompt this
 	// action was issued with; a confirm tap is only honored when it comes from
 	// that very message.

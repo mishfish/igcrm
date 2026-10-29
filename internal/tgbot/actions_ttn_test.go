@@ -2,10 +2,13 @@ package tgbot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"igcrm/internal/store"
 )
 
 // fakeShipper implements Shipper, recording calls into the slices below.
@@ -52,12 +55,21 @@ func TestCreateTTN_HappyPath(t *testing.T) {
 	b.actionCreateTTNStart(context.Background(), &CallbackQuery{ID: "cb1", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: chatID}}}, 10)
 	b.handlePendingReply(context.Background(), &Message{Chat: Chat{ID: chatID}, From: &User{ID: userID}, Text: "1,2"}, mustGet(t, b.Pending, userID))
 	p := mustGet(t, b.Pending, userID)
-	if p.Step != "confirm" || p.Weight != 1.2 {
+	if p.Step != "await_declared" || p.Weight != 1.2 {
 		t.Fatalf("pending after weight: %+v", p)
 	}
+	b.handlePendingReply(context.Background(), &Message{Chat: Chat{ID: chatID}, From: &User{ID: userID}, Text: "1500,5"}, p)
+	p = mustGet(t, b.Pending, userID)
+	if p.Step != "confirm" || p.DeclaredValue != 1500.5 || p.Weight != 1.2 {
+		t.Fatalf("pending after declared value: %+v", p)
+	}
+	last := cl.sent[len(cl.sent)-1].text
+	if !strings.Contains(last, "1.20 кг") || !strings.Contains(last, "1500.5 грн") {
+		t.Errorf("confirm summary must show weight and declared value: %q", last)
+	}
 
-	b.actionCreateTTNConfirm(context.Background(), &CallbackQuery{ID: "cb2", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: chatID}, MessageID: 2}}, 10)
-	if len(sh.createCalls) != 1 || sh.createCalls[0].weight != 1.2 {
+	b.actionCreateTTNConfirm(context.Background(), &CallbackQuery{ID: "cb2", From: User{ID: userID}, Message: &Message{Chat: Chat{ID: chatID}, MessageID: p.PromptMsgID}}, 10)
+	if len(sh.createCalls) != 1 || sh.createCalls[0].weight != 1.2 || sh.createCalls[0].declared != 1500.5 {
 		t.Fatalf("create calls: %+v", sh.createCalls)
 	}
 	if _, ok := b.Pending.Get(userID); ok {
@@ -259,5 +271,115 @@ func TestHandlePendingReply_SlashCancelClearsAnyKind(t *testing.T) {
 	}
 	if len(cl.sent) != 1 || !strings.Contains(cl.sent[0].text, "Скасовано") {
 		t.Fatalf("expected a cancellation reply: %+v", cl.sent)
+	}
+}
+
+// detailStore captures the audit detail passed to LogBotAction.
+type detailStore struct {
+	*fakeStore
+	details []string
+}
+
+func (s *detailStore) LogBotAction(ctx context.Context, tgUserID int64, action string, contactID, orderID *int64, detail json.RawMessage) error {
+	s.details = append(s.details, string(detail))
+	return s.fakeStore.LogBotAction(ctx, tgUserID, action, contactID, orderID, detail)
+}
+
+func declaredBot(amount *float64) (*Bot, *fakeShipper, *fakeClient) {
+	st := &fakeStore{botOrders: map[int64]store.BotOrder{10: {ID: 10, Amount: amount}}}
+	sh := &fakeShipper{createTTN: "ttn-1"}
+	cl := &fakeClient{}
+	b := &Bot{Store: st, Shipping: sh, Client: cl, Pending: NewPendingStore(time.Minute), Log: discardLog()}
+	b.Pending.Set(111, PendingAction{Kind: "create_ttn", OrderID: 10, Step: "await_declared", Weight: 2})
+	return b, sh, cl
+}
+
+func replyDeclared(t *testing.T, b *Bot, text string) {
+	t.Helper()
+	b.handlePendingReply(context.Background(), &Message{Chat: Chat{ID: 9001}, From: &User{ID: 111}, Text: text}, mustGet(t, b.Pending, 111))
+}
+
+func TestCreateTTN_WeightPromptsDeclaredValueWithAmountHint(t *testing.T) {
+	amt := 777.0
+	b, _, cl := declaredBot(&amt)
+	b.Pending.Set(111, PendingAction{Kind: "create_ttn", OrderID: 10, Step: "await_weight"})
+	replyDeclared(t, b, "2")
+	if len(cl.sent) != 1 || !strings.Contains(cl.sent[0].text, "Оголошена вартість") || !strings.Contains(cl.sent[0].text, "777 грн") {
+		t.Fatalf("prompt: %+v", cl.sent)
+	}
+}
+
+func TestCreateTTN_ZeroDeclaredWithKnownAmountPassesZero(t *testing.T) {
+	amt := 777.0
+	b, sh, cl := declaredBot(&amt)
+	replyDeclared(t, b, "0")
+	p := mustGet(t, b.Pending, 111)
+	if p.Step != "confirm" || p.DeclaredValue != 0 {
+		t.Fatalf("pending: %+v", p)
+	}
+	if !strings.Contains(cl.sent[0].text, "сума замовлення (777 грн)") {
+		t.Errorf("summary: %q", cl.sent[0].text)
+	}
+	b.actionCreateTTNConfirm(context.Background(), &CallbackQuery{ID: "c", From: User{ID: 111}, Message: &Message{Chat: Chat{ID: 9001}, MessageID: p.PromptMsgID}}, 10)
+	if len(sh.createCalls) != 1 || sh.createCalls[0].declared != 0 {
+		t.Fatalf("create calls: %+v", sh.createCalls)
+	}
+}
+
+func TestCreateTTN_ZeroDeclaredWithoutAmountReprompts(t *testing.T) {
+	b, sh, cl := declaredBot(nil)
+	replyDeclared(t, b, "0")
+	p := mustGet(t, b.Pending, 111)
+	if p.Step != "await_declared" || len(sh.createCalls) != 0 || len(cl.sent) != 1 {
+		t.Fatalf("pending %+v sent %+v", p, cl.sent)
+	}
+}
+
+func TestCreateTTN_InvalidDeclaredRepromptsAndKeepsPending(t *testing.T) {
+	amt := 777.0
+	for _, text := range []string{"abc", "nan", "-5", "2e9"} {
+		t.Run(text, func(t *testing.T) {
+			b, sh, cl := declaredBot(&amt)
+			replyDeclared(t, b, text)
+			p := mustGet(t, b.Pending, 111)
+			if p.Step != "await_declared" || p.Weight != 2 || len(sh.createCalls) != 0 {
+				t.Fatalf("pending %+v", p)
+			}
+			if len(cl.sent) != 1 || !strings.Contains(cl.sent[0].text, "Не розпізнав") {
+				t.Fatalf("sent %+v", cl.sent)
+			}
+		})
+	}
+}
+
+func TestCreateTTN_DeclaredStepCancelWorks(t *testing.T) {
+	b, _, _ := declaredBot(nil)
+	replyDeclared(t, b, "/cancel")
+	if _, ok := b.Pending.Get(111); ok {
+		t.Error("/cancel must clear pending")
+	}
+}
+
+func TestCreateTTN_AuditDetailContainsDeclaredValue(t *testing.T) {
+	st := &detailStore{fakeStore: &fakeStore{}}
+	sh := &fakeShipper{createTTN: "ttn-9"}
+	b := &Bot{Store: st, Shipping: sh, Client: &fakeClient{}, Pending: NewPendingStore(time.Minute), Log: discardLog()}
+	b.Pending.Set(111, PendingAction{Kind: "create_ttn", OrderID: 10, Step: "confirm", PromptMsgID: 1, Weight: 1.2, DeclaredValue: 1500})
+	b.actionCreateTTNConfirm(context.Background(), &CallbackQuery{ID: "c", From: User{ID: 111}, Message: &Message{Chat: Chat{ID: 1}, MessageID: 1}}, 10)
+	if len(st.details) != 1 || !strings.Contains(st.details[0], `"declared_value":1500`) {
+		t.Fatalf("details: %v", st.details)
+	}
+}
+
+func TestParseDeclaredValue(t *testing.T) {
+	for _, in := range []string{"nan", "inf", "-1", "1000001", "", "abc"} {
+		if _, ok := parseDeclaredValue(in); ok {
+			t.Errorf("%q accepted", in)
+		}
+	}
+	for in, want := range map[string]float64{"0": 0, "1500": 1500, " 12,5 ": 12.5, "1000000": 1000000} {
+		if got, ok := parseDeclaredValue(in); !ok || got != want {
+			t.Errorf("%q = %v %v", in, got, ok)
+		}
 	}
 }
