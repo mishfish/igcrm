@@ -54,6 +54,45 @@ func (c *Client) resolveSender(ctx context.Context) (ref, contactRef, phone stri
 	return ref, contact.Ref, contact.Phones, nil
 }
 
+// senderInfo — усе про відправника, що потрібно для ТТН; не змінюється між ТТН.
+type senderInfo struct {
+	cityName, warehouseNo  string
+	ref, contactRef, phone string
+	cityRef, warehouseRef  string
+}
+
+// senderFor повертає дані відправника, з кешу якщо місто/відділення ті самі — щоб кожна
+// ТТН не робила зайвих 4+ запитів до НП.
+func (c *Client) senderFor(ctx context.Context, cityName, warehouseNo string) (senderInfo, error) {
+	c.mu.Lock()
+	cached := c.sender
+	c.mu.Unlock()
+	if cached != nil && cached.cityName == cityName && cached.warehouseNo == warehouseNo {
+		return *cached, nil
+	}
+
+	s := senderInfo{cityName: cityName, warehouseNo: warehouseNo}
+	var err error
+	if s.ref, s.contactRef, s.phone, err = c.resolveSender(ctx); err != nil {
+		return senderInfo{}, fmt.Errorf("відправник: %w", err)
+	}
+	city, err := c.FindCity(ctx, cityName)
+	if err != nil {
+		return senderInfo{}, fmt.Errorf("місто відправника: %w", err)
+	}
+	s.cityRef = city.Ref
+	wh, err := c.FindWarehouse(ctx, city.Ref, warehouseNo)
+	if err != nil {
+		return senderInfo{}, fmt.Errorf("відділення відправника: %w", err)
+	}
+	s.warehouseRef = wh.Ref
+
+	c.mu.Lock()
+	c.sender = &s
+	c.mu.Unlock()
+	return s, nil
+}
+
 func (c *Client) firstContactPerson(ctx context.Context, counterpartyRef string) (contactPerson, error) {
 	var contacts []contactPerson
 	if err := c.call(ctx, "Counterparty", "getCounterpartyContactPersons", map[string]any{
@@ -95,18 +134,9 @@ func (c *Client) ensureRecipient(ctx context.Context, fullName, phone string) (s
 // CreateWaybill створює ТТН і повертає її номер (ttn) та внутрішній Ref документа
 // (docRef — потрібен лише для DeleteWaybill, це не те саме, що номер ТТН).
 func (c *Client) CreateWaybill(ctx context.Context, req WaybillRequest) (ttn, docRef string, err error) {
-	senderRef, senderContactRef, senderPhone, err := c.resolveSender(ctx)
+	sender, err := c.senderFor(ctx, req.SenderCityName, req.SenderWarehouseNo)
 	if err != nil {
-		return "", "", fmt.Errorf("відправник: %w", err)
-	}
-
-	senderCity, err := c.FindCity(ctx, req.SenderCityName)
-	if err != nil {
-		return "", "", fmt.Errorf("місто відправника: %w", err)
-	}
-	senderWarehouse, err := c.FindWarehouse(ctx, senderCity.Ref, req.SenderWarehouseNo)
-	if err != nil {
-		return "", "", fmt.Errorf("відділення відправника: %w", err)
+		return "", "", err
 	}
 
 	recipientCity, err := c.FindCity(ctx, req.RecipientCityName)
@@ -143,11 +173,11 @@ func (c *Client) CreateWaybill(ctx context.Context, req WaybillRequest) (ttn, do
 		"SeatsAmount":      "1",
 		"Description":      description,
 		"Cost":             formatNumber(req.DeclaredValue),
-		"CitySender":       senderCity.Ref,
-		"Sender":           senderRef,
-		"SenderAddress":    senderWarehouse.Ref,
-		"ContactSender":    senderContactRef,
-		"SendersPhone":     senderPhone,
+		"CitySender":       sender.cityRef,
+		"Sender":           sender.ref,
+		"SenderAddress":    sender.warehouseRef,
+		"ContactSender":    sender.contactRef,
+		"SendersPhone":     sender.phone,
 		"CityRecipient":    recipientCity.Ref,
 		"Recipient":        recipientRef,
 		"RecipientAddress": recipientWarehouse.Ref,

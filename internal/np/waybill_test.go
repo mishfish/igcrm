@@ -1,8 +1,10 @@
 package np
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"testing"
 )
@@ -175,5 +177,34 @@ func TestDeleteWaybill_APIErrorReturnsError(t *testing.T) {
 
 	if err := c.DeleteWaybill(context.Background(), "bad-ref"); err == nil {
 		t.Fatal("expected error when NP API reports failure")
+	}
+}
+
+func TestCreateWaybill_CachesSenderBetweenWaybills(t *testing.T) {
+	senderLookups := 0
+	base := npServer(t, nil)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req apiRequest
+		_ = json.Unmarshal(body, &req)
+		if req.CalledMethod == "getCounterparties" {
+			senderLookups++
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		base(w, r)
+	})
+	req := WaybillRequest{
+		SenderCityName: "Одеса", SenderWarehouseNo: "143",
+		RecipientFullName: "Іваненко Іван", RecipientPhone: "+380671234567",
+		RecipientCityName: "Київ", RecipientWarehouseNo: "45",
+		Weight: 1, DeclaredValue: 500,
+	}
+	for i := 0; i < 2; i++ {
+		if _, _, err := c.CreateWaybill(context.Background(), req); err != nil {
+			t.Fatalf("waybill %d: %v", i, err)
+		}
+	}
+	if senderLookups != 1 {
+		t.Fatalf("expected sender to be looked up once, got %d", senderLookups)
 	}
 }

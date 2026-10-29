@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
@@ -128,5 +129,105 @@ func TestCall_SurfacesAPIErrors(t *testing.T) {
 	}
 	if err.Error() == "" {
 		t.Fatal("expected non-empty error message")
+	}
+}
+
+func TestFindWarehouse_LooksUpByNumberInOneRequest(t *testing.T) {
+	calls := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		req := decodeRequest(t, r)
+		if req.MethodProperties["WarehouseId"] != "143" {
+			t.Fatalf("expected WarehouseId=143, got %v", req.MethodProperties)
+		}
+		writeJSON(t, w, map[string]any{"success": true, "data": []map[string]string{
+			{"Ref": "wh-ref-143", "Number": "143"},
+		}})
+	})
+
+	wh, err := c.FindWarehouse(context.Background(), "city-ref-1", "143")
+	if err != nil || wh.Ref != "wh-ref-143" {
+		t.Fatalf("wh=%+v err=%v", wh, err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 request, got %d", calls)
+	}
+}
+
+func TestFindWarehouse_FallsBackToPagingWhenNumberFilterMisses(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		req := decodeRequest(t, r)
+		if _, byNumber := req.MethodProperties["WarehouseId"]; byNumber {
+			writeJSON(t, w, map[string]any{"success": true, "data": []map[string]string{}})
+			return
+		}
+		if req.MethodProperties["Limit"] != "500" {
+			t.Fatalf("expected Limit=500 when paging, got %v", req.MethodProperties)
+		}
+		if req.MethodProperties["Page"] != "1" {
+			writeJSON(t, w, map[string]any{"success": true, "data": []map[string]string{}})
+			return
+		}
+		writeJSON(t, w, map[string]any{"success": true, "data": []map[string]string{
+			{"Ref": "wh-ref-7", "Number": "7"},
+		}})
+	})
+
+	wh, err := c.FindWarehouse(context.Background(), "city-ref-1", "7")
+	if err != nil || wh.Ref != "wh-ref-7" {
+		t.Fatalf("wh=%+v err=%v", wh, err)
+	}
+}
+
+func TestCall_RetriesOnTooManyRequests(t *testing.T) {
+	calls := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			writeJSON(t, w, map[string]any{"success": false, "errors": []string{"To many requests"}})
+			return
+		}
+		writeJSON(t, w, map[string]any{"success": true, "data": []map[string]string{{"Ref": "city-ref-1"}}})
+	})
+	c.RetryBase = time.Millisecond
+
+	city, err := c.FindCity(context.Background(), "Одеса")
+	if err != nil || city.Ref != "city-ref-1" {
+		t.Fatalf("city=%+v err=%v", city, err)
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 attempts, got %d", calls)
+	}
+}
+
+func TestCall_GivesUpAfterMaxRetries(t *testing.T) {
+	calls := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		writeJSON(t, w, map[string]any{"success": false, "errors": []string{"To many requests"}})
+	})
+	c.RetryBase = time.Millisecond
+
+	if _, err := c.FindCity(context.Background(), "Одеса"); err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if calls != maxRateLimitRetries+1 {
+		t.Fatalf("expected %d attempts, got %d", maxRateLimitRetries+1, calls)
+	}
+}
+
+func TestCall_DoesNotRetryOtherAPIErrors(t *testing.T) {
+	calls := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		writeJSON(t, w, map[string]any{"success": false, "errors": []string{"Invalid API key"}})
+	})
+	c.RetryBase = time.Millisecond
+
+	if _, err := c.FindCity(context.Background(), "Одеса"); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 attempt, got %d", calls)
 	}
 }

@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,7 +21,16 @@ type Client struct {
 	APIKey  string
 	HTTP    *http.Client
 	BaseURL string // для тестів; порожньо = api.novaposhta.ua
+
+	// RetryBase — пауза перед першим повтором, коли НП відповідає "To many requests"
+	// (далі подвоюється). 0 = 1 с.
+	RetryBase time.Duration
+
+	mu     sync.Mutex
+	sender *senderInfo // дані відправника не змінюються — кешуємо після першого успіху
 }
+
+const maxRateLimitRetries = 3
 
 type apiRequest struct {
 	APIKey           string         `json:"apiKey"`
@@ -58,8 +69,40 @@ func (c *Client) httpClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
-// call виконує метод API й декодує data у out (вказівник на слайс).
+// isRateLimited — НП повертає success:false з "To many requests" (саме так, з помилкою).
+func (e *APIError) isRateLimited() bool {
+	for _, msg := range e.Errors {
+		m := strings.ToLower(msg)
+		if strings.Contains(m, "many requests") {
+			return true
+		}
+	}
+	return false
+}
+
+// call виконує метод API й декодує data у out (вказівник на слайс). На "To many requests"
+// повторює запит кілька разів з паузою, що подвоюється.
 func (c *Client) call(ctx context.Context, modelName, method string, props map[string]any, out any) error {
+	delay := c.RetryBase
+	if delay <= 0 {
+		delay = time.Second
+	}
+	for attempt := 0; ; attempt++ {
+		err := c.callOnce(ctx, modelName, method, props, out)
+		var apiErr *APIError
+		if err == nil || attempt >= maxRateLimitRetries || !errors.As(err, &apiErr) || !apiErr.isRateLimited() {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+}
+
+func (c *Client) callOnce(ctx context.Context, modelName, method string, props map[string]any, out any) error {
 	body, err := json.Marshal(apiRequest{
 		APIKey:           c.APIKey,
 		ModelName:        modelName,
@@ -125,15 +168,30 @@ type Warehouse struct {
 	Description string `json:"Description"`
 }
 
-// FindWarehouse шукає відділення за точним номером у межах міста.
-// getWarehouses віддає максимум ~150 відділень за сторінку, тому для великих
-// міст (Київ тощо) перебираємо сторінки, доки не знайдемо збіг або список не скінчиться.
+// FindWarehouse шукає відділення за точним номером у межах міста. Спершу одним запитом
+// з фільтром WarehouseId; якщо так не знайшлось — перебирає сторінки (по 500), доки не
+// знайде збіг або список не скінчиться. Раніше перебір сторінок по ~150 одразу впирався в
+// ліміт запитів НП для великих міст.
 func (c *Client) FindWarehouse(ctx context.Context, cityRef, number string) (Warehouse, error) {
+	var byNumber []Warehouse
+	if err := c.call(ctx, "Address", "getWarehouses", map[string]any{
+		"CityRef":     cityRef,
+		"WarehouseId": number,
+	}, &byNumber); err != nil {
+		return Warehouse{}, err
+	}
+	for _, w := range byNumber {
+		if w.Number == number {
+			return w, nil
+		}
+	}
+
 	for page := 1; page <= 20; page++ {
 		var warehouses []Warehouse
 		err := c.call(ctx, "Address", "getWarehouses", map[string]any{
 			"CityRef": cityRef,
 			"Page":    fmt.Sprint(page),
+			"Limit":   "500",
 		}, &warehouses)
 		if err != nil {
 			return Warehouse{}, err
