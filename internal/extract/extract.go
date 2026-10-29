@@ -178,18 +178,12 @@ type Completer interface {
 	Complete(ctx context.Context, system, user string) (json.RawMessage, error)
 }
 
-// Notifier — мінімальний інтерфейс, щоб не тягнути internal/notify в тести Worker.
-type Notifier interface {
-	Alert(ctx context.Context, text string)
-}
-
 type Worker struct {
 	Store   Store
 	LLM     Completer
 	Model   string
 	History int
 	Log     *slog.Logger
-	Notify  Notifier // nil — без алертів (напр. у тестах)
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -272,18 +266,7 @@ func (w *Worker) Process(ctx context.Context, id int64) error {
 			if err != nil {
 				w.Log.Error("order auto-create", "contact", id, "err", err)
 			} else if created {
-				who := c.Username
-				if who == "" {
-					who = fmt.Sprintf("контакт %d", id)
-				}
 				w.Log.Info("order auto-created", "contact", id, "username", c.Username, "order", orderID, "items", items)
-				if w.Notify != nil {
-					msg := fmt.Sprintf("нове замовлення #%d від %s: %s", orderID, who, items)
-					if amount != nil {
-						msg += fmt.Sprintf(" (%.0f грн)", *amount)
-					}
-					w.Notify.Alert(ctx, msg)
-				}
 			}
 		}
 	}
