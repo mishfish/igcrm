@@ -178,12 +178,60 @@ type Completer interface {
 	Complete(ctx context.Context, system, user string) (json.RawMessage, error)
 }
 
+// Notifier — мінімальний інтерфейс алертів (internal/notify), щоб не тягнути його в тести.
+type Notifier interface {
+	Alert(ctx context.Context, text string)
+}
+
 type Worker struct {
 	Store   Store
 	LLM     Completer
 	Model   string
 	History int
 	Log     *slog.Logger
+	Notify  Notifier // nil — без алертів
+
+	now              func() time.Time // для тестів; nil = time.Now
+	creditsOut       bool             // останній виклик LLM упав через закінчені кредити
+	lastCreditsAlert time.Time
+}
+
+// creditsAlertEvery — як часто нагадувати, поки кредити не поповнили.
+const creditsAlertEvery = 6 * time.Hour
+
+// isCreditsError — Claude API відповідає 400 "Your credit balance is too low ..."
+// (окремого коду помилки для цього немає, тож розпізнаємо за текстом).
+func isCreditsError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "credit balance")
+}
+
+func (w *Worker) clock() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
+}
+
+// noteLLMResult шле алерт, коли закінчились кредити (не частіше за creditsAlertEvery),
+// і одне повідомлення, коли виклики знову проходять.
+func (w *Worker) noteLLMResult(ctx context.Context, err error) {
+	switch {
+	case isCreditsError(err):
+		if !w.creditsOut || w.clock().Sub(w.lastCreditsAlert) >= creditsAlertEvery {
+			w.alert(ctx, "закінчились кредити Claude API — розбір переписок зупинено, нові картки не заповнюються. Поповни баланс у Claude Console (Billing).")
+			w.lastCreditsAlert = w.clock()
+		}
+		w.creditsOut = true
+	case err == nil && w.creditsOut:
+		w.creditsOut = false
+		w.alert(ctx, "кредити Claude API знову працюють — розбір переписок відновлено.")
+	}
+}
+
+func (w *Worker) alert(ctx context.Context, text string) {
+	if w.Notify != nil {
+		w.Notify.Alert(ctx, text)
+	}
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -238,6 +286,7 @@ func (w *Worker) Process(ctx context.Context, id int64) error {
 	callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	result, err := w.LLM.Complete(callCtx, SystemPrompt, BuildUserPrompt(c.Values, lines))
+	w.noteLLMResult(ctx, err)
 	if err != nil {
 		return err
 	}
