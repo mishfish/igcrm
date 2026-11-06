@@ -36,7 +36,7 @@ You need: a VPS (≥2 GB RAM, Directus on Node eats ~400 MB), a domain with an A
 at the server's IP, ports 80/443 open.
 
 ```sh
-git clone … /opt/igcrm && cd /opt/igcrm   # or scp this folder
+git clone https://github.com/mishfish/igcrm.git /opt/igcrm && cd /opt/igcrm   # or scp this folder
 cp .env.example .env && nano .env          # fill in everything except IG_* (for now)
 docker compose up -d --build
 docker compose logs -f igcrm
