@@ -9,16 +9,70 @@ You keep chatting with customers as usual, from your phone. The service:
 4. flags the card `needs_review = true` so you can check what changed (history is in `extractions`);
 5. if the customer explicitly confirmed they want to order, creates an `orders` row for you
    (item, amount if stated, recipient info from the card) — see **Auto-created orders** below;
-6. refreshes the Instagram token itself and sends a Telegram alert if it fails.
+6. creates a **Nova Poshta waybill (TTN)** for an order in one click, from Directus or from Telegram;
+7. pushes cards that need review and orders ready to ship to a **Telegram bot**, where you can confirm them;
+8. refreshes the Instagram token itself and sends a Telegram alert if it fails.
 
 You manage orders in Directus: pick the customer, enter the item and amount — name/phone/branch
 and sizes are filled in automatically from the card.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    ig["Instagram Direct"] -- "webhooks" --> caddy["Caddy<br/>HTTPS"]
+    caddy --> svc["igcrm (Go)"]
+    caddy --> directus["Directus<br/>admin UI"]
+
+    svc --> pg[("Postgres")]
+    directus <--> pg
+    svc -- "extract card fields" --> llm["LLM<br/>OpenAI-compatible / Claude"]
+    svc -- "Graph API: usernames,<br/>token refresh, backfill" --> ig
+    svc -- "create / cancel TTN" --> np["Nova Poshta API"]
+    svc <--> tg["Telegram bot<br/>review · orders · alerts"]
+    directus -- "Create TTN button" --> svc
+
+    classDef go fill:#00ADD8,stroke:#007d9c,color:#fff
+    classDef store fill:#1e293b,stroke:#2dd4bf,color:#e2e8f0
+    classDef ext fill:#312e81,stroke:#a78bfa,color:#fff
+    class svc go
+    class pg store
+    class ig,llm,np,tg ext
 ```
-Instagram ─webhook─▶ igcrm (Go) ─▶ Postgres ◀─ Directus (UI)
-                        └─▶ LLM (OpenAI-compatible API)
-           Caddy (HTTPS, Let's Encrypt) in front of everything
+
+### From a message to a shipped order
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Customer
+    participant IG as Instagram
+    participant S as igcrm
+    participant DB as Postgres
+    participant L as LLM
+    participant NP as Nova Poshta
+    actor Y as You
+
+    C->>IG: "hi, do you have it in M?"
+    IG->>S: webhook (message, echo)
+    S->>DB: save message, upsert contact
+    Note over S: wait 3 min of silence in the thread
+    S->>L: recent messages + current card
+    L-->>S: name, phone, city, branch, sizes, intent
+    S->>DB: update card (needs_review), log extraction
+    opt customer explicitly confirmed
+        S->>DB: create order (status new, auto_created)
+    end
+    S->>Y: Telegram: card to review / new order
+    Y->>S: ✅ confirm, 📦 create TTN
+    S->>NP: create waybill
+    NP-->>S: TTN number
+    S->>DB: save TTN on the order
 ```
+
+The LLM never overwrites a field with an empty value, and `auto_update=false` on a contact turns
+extraction off for it completely. Every change is in `extractions` (old → new), so a bad guess is
+easy to spot and undo.
 
 ## Tables
 
@@ -171,6 +225,22 @@ is silently ignored (no reply at all), and every action the bot takes is logged 
   Manual refresh: paste the new token into `.env`, set `IG_ACCESS_TOKEN_FORCE=1`, restart, then set it back to `0`.
 - **API version**: `IG_API_VERSION`. Meta retires old versions roughly every ~2 years — bump it then.
 - **Media**: attachment URLs in `messages.attachments` are temporary (Meta's CDN); photos aren't stored.
+
+## Project layout
+
+```
+cmd/igcrm/            entrypoint: serve | migrate | backfill
+internal/ig/          webhook handler (signature check), Graph API client
+internal/extract/     LLM prompts and providers (OpenAI-compatible, Claude)
+internal/store/       Postgres access, SQL migrations
+internal/jobs/        token refresh, profile fetcher, backfill
+internal/np/          Nova Poshta API client, waybill creation
+internal/shipping/    "Create TTN" HTTP handler for Directus
+internal/tgbot/       Telegram bot: review, orders, TTN, push notifications
+internal/notify/      Telegram alerts
+directus-extensions/  chat-history and order-chat interfaces
+scripts/              backups
+```
 
 ## Development
 
